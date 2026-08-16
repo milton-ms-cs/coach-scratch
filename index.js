@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.1.0";
+  const VERSION = "1.2.0";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
@@ -617,6 +617,50 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
 
   codioIDE.coachBot.register("scratchCoachHelp", "Scratch Coach", onButtonPress);
 
+  // ============================================================
+  // Session log — a hidden, shared workspace file (.coach-log.json) that every
+  // coach appends to (one entry per session, tagged with `coach`), summarizing
+  // how students use the coaches. Dot-prefixed so it never enters the LLM
+  // context (collectProjectPaths already skips dot-files). Deliberately records
+  // the student's questions: Codio's own course coach-log export logs only the
+  // userPrompt field, which is empty for messages-based coaches like these —
+  // this file is where the questions live. Sessions are never dropped (always
+  // appended). Logging is wrapped so it can never break the coach.
+  // ============================================================
+
+  const SESSION_LOG_PATH = ".coach-log.json";
+  const COACH_ID = "scratch";
+  const MAX_LOGGED_QUESTIONS = 50;
+
+  async function loadSessionHistory() {
+    const F = codioIDE.files;
+    if (!F || typeof F.getContent !== "function") return [];
+    try {
+      const parsed = JSON.parse(await F.getContent(SESSION_LOG_PATH));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function saveSessionHistory(history) {
+    const F = codioIDE.files;
+    if (!F || typeof F.add !== "function") return;
+    const text = JSON.stringify(history, null, 2);
+    try {
+      await F.add(SESSION_LOG_PATH, text);
+    } catch (e) {
+      // add() rejects when the file exists — delete and re-add
+      try {
+        if (typeof F.deleteFiles !== "function") return;
+        await F.deleteFiles([SESSION_LOG_PATH]);
+        await F.add(SESSION_LOG_PATH, text);
+      } catch (e2) {
+        // Logging must never break the coach
+      }
+    }
+  }
+
   async function onButtonPress() {
     codioIDE.coachBot.write(
       `Scratch Coach v${VERSION} - Ask me questions about your Scratch project!`,
@@ -644,6 +688,29 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
 
       break;
     }
+
+    const sessionHistory = await loadSessionHistory();
+    const session = {
+      coach: COACH_ID,
+      started: new Date().toISOString(),
+      updated: null,
+      ended: null,
+      coachVersion: VERSION,
+      exchanges: 0,
+      questions: []
+    };
+    sessionHistory.push(session);
+
+    async function recordTurn(question) {
+      session.exchanges += 1;
+      if (session.questions.length < MAX_LOGGED_QUESTIONS) {
+        session.questions.push(String(question).slice(0, 300));
+      }
+      session.updated = new Date().toISOString();
+      await saveSessionHistory(sessionHistory);
+    }
+
+    await recordTurn(initialInput);
 
     // Unpack the student's .sb3 project(s) into readable text
     codioIDE.coachBot.showThinkingAnimation();
@@ -712,6 +779,8 @@ The student says: ${initialInput}`;
         break;
       }
 
+      await recordTurn(input);
+
       messages.push({
         "role": "user",
         "content": input
@@ -737,6 +806,9 @@ The student says: ${initialInput}`;
         messages.splice(1, 2); // drop the oldest assistant+user pair, keep messages[0] (context) intact
       }
     }
+
+    session.ended = new Date().toISOString();
+    await saveSessionHistory(sessionHistory);
 
     codioIDE.coachBot.write("You're welcome! Come back any time you're stuck on your Scratch project!", codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
     codioIDE.coachBot.showMenu();
