@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.0.1";
+  const VERSION = "1.0.2";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
@@ -559,6 +559,83 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
   }
 
   // ============================================================
+  // TEMPORARY diagnostics (type "diag" at any prompt) — remove before real deploy
+  // ============================================================
+
+  async function runDiagnostics() {
+    const L = [];
+    const p = function(s) { L.push(s); };
+    p("=== Scratch Coach diagnostics v" + VERSION + " ===");
+    try {
+      const ws = codioIDE.workspace;
+      p("workspace present: " + !!ws);
+      p("getFileTree is function: " + !!(ws && typeof ws.getFileTree === "function"));
+      p("readFile is function: " + !!(ws && typeof ws.readFile === "function"));
+      if (!ws || typeof ws.getFileTree !== "function") return L.join("\n");
+
+      let tree;
+      try {
+        tree = await ws.getFileTree();
+      } catch (e) {
+        p("getFileTree() THREW: " + (e && e.message));
+        return L.join("\n");
+      }
+      p("getFileTree() returned: " + (tree === undefined ? "undefined" : tree === null ? "null" : typeof tree));
+      if (tree && typeof tree === "object") {
+        p("tree top-level keys: " + Object.keys(tree).join(","));
+        if (tree.children) {
+          p("tree.children length: " + tree.children.length);
+          if (tree.children[0]) {
+            p("first child keys: " + Object.keys(tree.children[0]).join(","));
+            p("first child sample: " + JSON.stringify(tree.children[0]).slice(0, 250));
+          }
+        } else {
+          p("(no .children) tree sample: " + JSON.stringify(tree).slice(0, 300));
+        }
+      }
+
+      const paths = findProjectFiles(tree, "");
+      p("findProjectFiles found: " + JSON.stringify(paths));
+
+      // Read project.sb3 even if findProjectFiles missed it (we know it's at root).
+      const tryPaths = paths.length ? paths.slice(0, 1) : ["project.sb3"];
+      for (const path of tryPaths) {
+        p("--- readFile(" + path + ") ---");
+        let raw;
+        try {
+          raw = await ws.readFile(path);
+        } catch (e) {
+          p("readFile THREW: " + (e && e.message));
+          continue;
+        }
+        p("typeof raw: " + typeof raw);
+        p("constructor: " + (raw && raw.constructor && raw.constructor.name));
+        if (typeof raw === "string") {
+          p("string length: " + raw.length);
+          p("first 12 chars: " + JSON.stringify(raw.slice(0, 12)));
+          p("starts with PK: " + (raw.slice(0, 2) === "PK"));
+          p("starts with UEs (base64): " + (raw.slice(0, 3) === "UEs"));
+          p("contains U+FFFD (utf8 mangling): " + (raw.indexOf("�") >= 0));
+        } else if (raw && (raw.byteLength !== undefined || raw.length !== undefined)) {
+          p("byteLength/length: " + (raw.byteLength !== undefined ? raw.byteLength : raw.length));
+        }
+        try {
+          const bytes = await toBytes(raw);
+          p("toBytes -> Uint8Array length: " + bytes.length);
+          p("first 4 bytes: " + Array.from(bytes.slice(0, 4)).join(","));
+          const json = await extractProjectJson(bytes);
+          p("extractProjectJson OK, json length: " + json.length);
+        } catch (e) {
+          p("UNPACK FAILED: " + (e && e.message));
+        }
+      }
+    } catch (e) {
+      p("diagnostics error: " + (e && e.message));
+    }
+    return L.join("\n");
+  }
+
+  // ============================================================
   // Coach conversation loop
   // ============================================================
 
@@ -586,6 +663,16 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
 
       if (initialInput === "version") {
         codioIDE.coachBot.write(`Current version: ${VERSION}`, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
+        continue;
+      }
+
+      if (initialInput === "diag") {
+        codioIDE.coachBot.showThinkingAnimation();
+        let report;
+        try { report = await runDiagnostics(); }
+        catch (e) { report = "diag crashed: " + (e && e.message); }
+        finally { codioIDE.coachBot.hideThinkingAnimation(); }
+        codioIDE.coachBot.write(report, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
         continue;
       }
 
@@ -651,6 +738,16 @@ The student says: ${initialInput}`;
 
       if (input === "version") {
         codioIDE.coachBot.write(`Current version: ${VERSION}`, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
+        continue;
+      }
+
+      if (input === "diag") {
+        codioIDE.coachBot.showThinkingAnimation();
+        let report;
+        try { report = await runDiagnostics(); }
+        catch (e) { report = "diag crashed: " + (e && e.message); }
+        finally { codioIDE.coachBot.hideThinkingAnimation(); }
+        codioIDE.coachBot.write(report, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
         continue;
       }
 
