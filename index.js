@@ -427,19 +427,49 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
     }
   }
 
-  function renderTarget(target) {
+  // Collect the ids of every variable/list actually referenced by a block
+  // (Scratch auto-creates "my variable" in every project, so declared != used).
+  function collectUsedDataIds(targets) {
+    const used = {};
+    for (const target of targets) {
+      const blocks = target.blocks || {};
+      for (const id in blocks) {
+        const block = blocks[id];
+        if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+        if (block.fields) {
+          if (block.fields.VARIABLE && block.fields.VARIABLE[1]) used[block.fields.VARIABLE[1]] = true;
+          if (block.fields.LIST && block.fields.LIST[1]) used[block.fields.LIST[1]] = true;
+        }
+        if (block.inputs) {
+          for (const key in block.inputs) {
+            const data = block.inputs[key] && block.inputs[key][1];
+            if (Array.isArray(data) && (data[0] === 12 || data[0] === 13) && data[2]) used[data[2]] = true;
+          }
+        }
+      }
+    }
+    return used;
+  }
+
+  function dataNames(dict, usedIds) {
+    const names = [];
+    for (const key in (dict || {})) {
+      names.push(dict[key][0] + (usedIds[key] ? "" : " (not used in any script)"));
+    }
+    return names;
+  }
+
+  function renderTarget(target, usedIds) {
     const lines = [];
     lines.push(target.isStage ? "=== Stage ===" : "=== Sprite: " + target.name + " ===");
 
     const costumes = (target.costumes || []).map(function(c) { return c.name; });
     if (costumes.length) lines.push((target.isStage ? "Backdrops: " : "Costumes: ") + costumes.join(", "));
 
-    const varNames = [];
-    for (const key in (target.variables || {})) varNames.push(target.variables[key][0]);
+    const varNames = dataNames(target.variables, usedIds);
     if (varNames.length) lines.push("Variables: " + varNames.join(", "));
 
-    const listNames = [];
-    for (const key in (target.lists || {})) listNames.push(target.lists[key][0]);
+    const listNames = dataNames(target.lists, usedIds);
     if (listNames.length) lines.push("Lists: " + listNames.join(", "));
 
     const blocks = target.blocks || {};
@@ -460,12 +490,13 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
   function renderProject(project) {
     const targets = project.targets || [];
     const sprites = targets.filter(function(t) { return !t.isStage; });
+    const usedIds = collectUsedDataIds(targets);
     const parts = [];
     parts.push("Project overview: " + sprites.length + " sprite(s): " +
       (sprites.map(function(s) { return s.name; }).join(", ") || "(none)"));
     for (const target of targets) {
       parts.push("");
-      parts.push(renderTarget(target));
+      parts.push(renderTarget(target, usedIds));
     }
     return parts.join("\n");
   }

@@ -60,7 +60,8 @@ eval(src);
     "jump (50)",
     "define jump (height)",
     "change y by (height)",
-    "Lists: high scores"
+    "Lists: high scores (not used in any script)",
+    "Variables: score\n" // used variable gets no annotation
   ];
   let failures = 0;
   for (const needle of mustContain) {
