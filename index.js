@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.0.5";
+  const VERSION = "1.1.0";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
@@ -508,8 +508,14 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
   //  The supported channel is the codioIDE.files namespace.)
   // ============================================================
 
-  // getStructure()'s exact shape is undocumented, so walk it defensively:
-  // handle arrays, .children/.contents/.files, and name/path/type variants.
+  function isProjectFileName(name) {
+    const lower = String(name).toLowerCase();
+    return lower.endsWith(".sb3") || lower === "project.json";
+  }
+
+  // getStructure() returns a name->value MAP: a file's value is a leaf (Codio
+  // uses 1), a directory's value is a nested map. We also tolerate the
+  // array-of-nodes / {name,type,children} shapes in case other contexts differ.
   function collectProjectPaths(node, prefix, out) {
     if (!node) return;
     if (Array.isArray(node)) {
@@ -518,18 +524,31 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
     }
     if (typeof node !== "object") return;
 
+    // Explicit node object: {name/path, type/children, ...}
     const name = node.name || node.title || node.label || null;
-    if (name && String(name).charAt(0) === ".") return; // skip dotfiles/dirs
     const kids = node.children || node.contents || node.files || null;
-    const isDir = node.type === "directory" || node.type === "dir" ||
-                  node.isDir === true || node.isDirectory === true || Array.isArray(kids);
-    const full = node.path || (name ? (prefix ? prefix + "/" + name : name) : prefix);
-
-    if (name && !isDir) {
-      const lower = String(name).toLowerCase();
-      if (lower.endsWith(".sb3") || lower === "project.json") out.push(full);
+    if (name || kids) {
+      if (name && String(name).charAt(0) === ".") return; // skip dotfiles/dirs
+      const isDir = node.type === "directory" || node.type === "dir" ||
+                    node.isDir === true || node.isDirectory === true || Array.isArray(kids);
+      const full = node.path || (name ? (prefix ? prefix + "/" + name : name) : prefix);
+      if (name && !isDir && isProjectFileName(name)) out.push(full);
+      if (kids) collectProjectPaths(kids, full || prefix, out);
+      return;
     }
-    if (kids) collectProjectPaths(kids, full || prefix, out);
+
+    // name->value map shape (Codio getStructure): object value = dir, else file.
+    for (const key in node) {
+      if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+      if (String(key).charAt(0) === ".") continue; // skip dotfiles/dirs
+      const full = prefix ? prefix + "/" + key : key;
+      const value = node[key];
+      if (value && typeof value === "object") {
+        collectProjectPaths(value, full, out); // directory
+      } else if (isProjectFileName(key)) {
+        out.push(full);
+      }
+    }
   }
 
   // Read one file through codioIDE.files and return its project.json text.
@@ -593,66 +612,6 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
   }
 
   // ============================================================
-  // TEMPORARY diagnostics (type "diag" at any prompt) — remove before real deploy
-  // ============================================================
-
-  // Describe a possible file-content string: is it a zip, base64, or utf8-mangled?
-  function describeContentString(s, p) {
-    p("  content type: string, len=" + s.length);
-    p("  first 16: " + JSON.stringify(s.slice(0, 16)));
-    p("  PK:" + (s.slice(0, 2) === "PK") +
-      " UEs(base64):" + (s.slice(0, 3) === "UEs") +
-      " U+FFFD(utf8 mangled):" + (s.indexOf("�") >= 0));
-  }
-
-  async function runDiagnostics() {
-    const L = [];
-    const p = function(s) { L.push(s); };
-    p("=== Scratch Coach diagnostics v" + VERSION + " ===");
-
-    const F = codioIDE.files;
-    p("codioIDE.files present: " + !!F);
-    if (F) {
-      p("  getStructure:" + (typeof F.getStructure) +
-        " getContent:" + (typeof F.getContent) +
-        " getContentBase64:" + (typeof F.getContentBase64));
-      try {
-        const st = await F.getStructure();
-        p("getStructure type: " + (Array.isArray(st) ? "array[" + st.length + "]" : typeof st));
-        p("getStructure sample: " + JSON.stringify(st).slice(0, 500));
-      } catch (e) {
-        p("getStructure THREW: " + (e && e.message));
-      }
-    }
-
-    for (const path of ["project.sb3", "/project.sb3"]) {
-      p("--- getContentBase64(" + JSON.stringify(path) + ") ---");
-      try {
-        const b64 = await F.getContentBase64(path);
-        p("  type:" + typeof b64 + " len:" + (b64 && b64.length));
-        if (typeof b64 === "string" && b64.length) {
-          describeContentString(b64, p);
-          try {
-            const bytes = await toBytes(b64);
-            p("  toBytes len:" + bytes.length + " first4:" + Array.from(bytes.slice(0, 4)).join(","));
-            const json = await extractProjectJson(bytes);
-            const rendered = renderProject(JSON.parse(json));
-            p("  UNPACK OK — rendered " + rendered.length + " chars. Preview:");
-            p(rendered.slice(0, 300));
-          } catch (e) {
-            p("  unpack failed: " + (e && e.message));
-          }
-          break; // got content from this path; no need to try the next format
-        }
-      } catch (e) {
-        p("  getContentBase64 THREW: " + (e && e.message));
-      }
-    }
-
-    return L.join("\n");
-  }
-
-  // ============================================================
   // Coach conversation loop
   // ============================================================
 
@@ -680,16 +639,6 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
 
       if (initialInput === "version") {
         codioIDE.coachBot.write(`Current version: ${VERSION}`, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
-        continue;
-      }
-
-      if (initialInput === "diag") {
-        codioIDE.coachBot.showThinkingAnimation();
-        let report;
-        try { report = await runDiagnostics(); }
-        catch (e) { report = "diag crashed: " + (e && e.message); }
-        finally { codioIDE.coachBot.hideThinkingAnimation(); }
-        codioIDE.coachBot.write(report, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
         continue;
       }
 
@@ -758,16 +707,6 @@ The student says: ${initialInput}`;
         continue;
       }
 
-      if (input === "diag") {
-        codioIDE.coachBot.showThinkingAnimation();
-        let report;
-        try { report = await runDiagnostics(); }
-        catch (e) { report = "diag crashed: " + (e && e.message); }
-        finally { codioIDE.coachBot.hideThinkingAnimation(); }
-        codioIDE.coachBot.write(report, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
-        continue;
-      }
-
       const trimmedInput = input.trim().toLowerCase();
       if (exitPhrases.includes(trimmedInput)) {
         break;
@@ -804,6 +743,6 @@ The student says: ${initialInput}`;
   }
 
   // Exposed for the Node test harness in test/ — unused inside Codio.
-  window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject };
+  window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject, collectProjectPaths };
 
 })(window.codioIDE, window);

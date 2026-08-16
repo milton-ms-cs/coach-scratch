@@ -27,18 +27,28 @@ Node 18+ is required — the test relies on the same native `DecompressionStream
 
 The distinguishing problem this coach solves: a `.sb3` file is a ZIP containing a `project.json` block graph, which is meaningless to an LLM as-is. Everything below turns it into readable scratchblocks-style text, entirely in-browser with **zero dependencies** (Codio's CSP can block CDN scripts). The pipeline, in order:
 
-1. **`findProjectFiles(tree)`** — walks `codioIDE.workspace.getFileTree()` for `.sb3` files (and loose `project.json`), skipping dot-files/dirs, capped at 3.
-2. **`toBytes(raw)`** — normalizes whatever `readFile()` returns (Codio's binary return type is undocumented) into a `Uint8Array`: handles `Uint8Array`, `ArrayBuffer`, `Blob`, base64 strings, and latin-1 binary strings.
+1. **`collectProjectPaths(structure)`** — walks `codioIDE.files.getStructure()` for `.sb3` files (and loose `project.json`), skipping dot-files/dirs. `getScratchProjectsText()` also always tries the conventional `project.sb3` path directly, dedupes by basename, and caps at 3 projects.
+2. **`readProjectJson(F, path)`** — reads `.sb3` files as base64 via `codioIDE.files.getContentBase64()`; **`toBytes(raw)`** then decodes that base64 into a `Uint8Array` (it also handles `Uint8Array`/`ArrayBuffer`/`Blob`/latin-1, kept for the `getContent()` text path).
 3. **`extractProjectJson(bytes)`** — a minimal ZIP central-directory reader that locates `project.json` and inflates it via `inflateRaw()` (native `DecompressionStream("deflate-raw")`). Handles stored (method 0) and deflate (method 8).
 4. **`renderProject(project)`** — converts the block graph to text. `renderStack` follows `.next` pointers; `renderBlockLine` handles C-blocks (indent + `end`, plus `else` for `control_if_else`); `renderReporter`/`renderInput` render nested reporters inline. Opcodes map through the `OPCODES` template table (`{PLACEHOLDER}` → filled from `block.inputs`/`block.fields`); unknown opcodes fall back to `genericText`. Custom blocks (`procedures_definition`/`procedures_call`) are reconstructed from `mutation.proccode`.
 
 The rendered text is sent to the LLM in `<project>` tags on the **first** user message only, alongside `<guide>` (from `context.guidesPage.content`). Message history is trimmed to `messages[0]` (the context-bearing first message) + the last 8 messages.
 
+### File access: use `codioIDE.files`, nothing else
+
+Verified live in Codio (Aug 2026), and the reason v1.0.0–v1.0.4 silently failed in the IDE:
+
+- **`codioIDE.workspace` does not exist** in the Custom Assistant runtime (`getFileTree`/`readFile` are undefined). Earlier versions targeted it and always hit the "describe your blocks" fallback.
+- **`coachBot.getContext().files` only lists *open editor* files** — in a Scratch project that's the Scratch GUI, so it's an empty array; it never contains the `.sb3`.
+- The supported channel is the **`codioIDE.files`** namespace: `getStructure()`, `getContent(path)`, `getContentBase64(path)`. Reference: <https://codio.github.io/client/codioIDE.files.html>.
+- **`getStructure()` returns a name→value map** (file value = a leaf like `1`; directory value = a nested map), *not* an array of nodes. `collectProjectPaths()` handles both that map shape and the legacy `{name,type,children}` shape — both are covered by tests in `test/run-test.js`.
+- **Read `.sb3` as base64.** A plain/UTF-8 read corrupts the deflate stream (high bytes become U+FFFD); `getContentBase64()` round-trips raw bytes intact.
+
 ### Things that will trip you up
 
 - **`OPCODES` is a hand-maintained map.** When Scratch adds/changes blocks, unmapped opcodes silently degrade to `genericText`. If a rendered block looks wrong, check for a missing/incorrect template entry — and if it's a new C-block, it must also be added to `C_BLOCKS` or its body won't be indented/closed.
 - **`collectUsedDataIds` matters for correctness, not cosmetics.** Scratch auto-creates a `my variable` in every project, so *declared ≠ used*. Variables/lists not referenced by any block are annotated `(not used in any script)` so the LLM doesn't chase phantom state. The test asserts both the annotated and un-annotated forms.
-- **Graceful degradation is a feature.** Every unpack path is wrapped so that a corrupt/unreadable file, a missing workspace API, or a UTF-8-decoded binary (which corrupts the deflate stream — see README) results in a "ask the student to describe their scripts" message rather than a crash. Preserve this when editing `getScratchProjectsText`.
+- **Graceful degradation is a feature.** Every discovery/read/unpack path is wrapped so that a corrupt/unreadable file, an unavailable `codioIDE.files` API, or a bad byte stream results in a "ask the student to describe their scripts" message rather than a crash. Preserve this when editing `getScratchProjectsText`.
 - **Block-language only in LLM output.** The system prompt requires the model to describe fixes as visual blocks ("snap a *wait* block inside your forever loop"), never as scratchblocks text — students see colorful blocks, not the text representation the model reads.
 
 ### Version banner / easter egg

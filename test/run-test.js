@@ -88,6 +88,42 @@ eval(src);
     failures++;
   } catch (e) { /* expected */ }
 
+  // --- Test 5: collectProjectPaths against Codio's real getStructure() shape ---
+  // getStructure() returns a name->value MAP: file value = leaf (1), dir = nested map.
+  // (This is the shape observed live in a Codio Scratch project.)
+  const structure = {
+    ".gitignore": 1,
+    "project.sb3": 1,
+    ".guides": { "img": { ".gitkeep": 1, "space-talk-pico-click.svg": 1 } },
+    ".settings": 1,
+    "extra": { "bonus.sb3": 1, "notes.txt": 1 }
+  };
+  const found = [];
+  t.collectProjectPaths(structure, "", found);
+  if (found.indexOf("project.sb3") < 0) {
+    console.error("FAIL: collectProjectPaths missed root project.sb3 — found: " + JSON.stringify(found));
+    failures++;
+  }
+  if (found.indexOf("extra/bonus.sb3") < 0) {
+    console.error("FAIL: collectProjectPaths missed nested extra/bonus.sb3 — found: " + JSON.stringify(found));
+    failures++;
+  }
+  if (found.indexOf("notes.txt") >= 0) {
+    console.error("FAIL: collectProjectPaths picked up a non-project file (notes.txt)");
+    failures++;
+  }
+  // Legacy array-of-nodes shape should still work.
+  const nodeShape = [
+    { name: "sub", type: "directory", children: [{ name: "game.sb3", type: "file" }] },
+    { name: "readme.md", type: "file" }
+  ];
+  const found2 = [];
+  t.collectProjectPaths(nodeShape, "", found2);
+  if (found2.indexOf("sub/game.sb3") < 0) {
+    console.error("FAIL: collectProjectPaths missed sub/game.sb3 in node-shape — found: " + JSON.stringify(found2));
+    failures++;
+  }
+
   if (failures) {
     console.error("\n" + failures + " test failure(s)");
     process.exit(1);
