@@ -1,0 +1,50 @@
+{
+  "targets": [
+    {
+      "isStage": true,
+      "name": "Stage",
+      "variables": { "varScore": ["score", 0] },
+      "lists": {},
+      "broadcasts": { "bcJump": "jump" },
+      "blocks": {},
+      "costumes": [{ "name": "backdrop1" }],
+      "sounds": []
+    },
+    {
+      "isStage": false,
+      "name": "Cat",
+      "variables": {},
+      "lists": { "listHi": ["high scores", []] },
+      "blocks": {
+        "a1": { "opcode": "event_whenflagclicked", "next": "a2", "parent": null, "inputs": {}, "fields": {}, "shadow": false, "topLevel": true },
+        "a2": { "opcode": "motion_gotoxy", "next": "a3", "parent": "a1", "inputs": { "X": [1, [4, "0"]], "Y": [1, [4, "0"]] }, "fields": {}, "shadow": false, "topLevel": false },
+        "a3": { "opcode": "data_setvariableto", "next": "a4", "parent": "a2", "inputs": { "VALUE": [1, [10, "0"]] }, "fields": { "VARIABLE": ["score", "varScore"] }, "shadow": false, "topLevel": false },
+        "a4": { "opcode": "control_forever", "next": null, "parent": "a3", "inputs": { "SUBSTACK": [2, "a5"] }, "fields": {}, "shadow": false, "topLevel": false },
+        "a5": { "opcode": "control_if_else", "next": "a11", "parent": "a4", "inputs": { "CONDITION": [2, "a6"], "SUBSTACK": [2, "a8"], "SUBSTACK2": [2, "a10"] }, "fields": {}, "shadow": false, "topLevel": false },
+        "a6": { "opcode": "sensing_touchingobject", "next": null, "parent": "a5", "inputs": { "TOUCHINGOBJECTMENU": [1, "a7"] }, "fields": {}, "shadow": false, "topLevel": false },
+        "a7": { "opcode": "sensing_touchingobjectmenu", "next": null, "parent": "a6", "inputs": {}, "fields": { "TOUCHINGOBJECTMENU": ["_edge_", null] }, "shadow": true, "topLevel": false },
+        "a8": { "opcode": "motion_turnright", "next": "a9", "parent": "a5", "inputs": { "DEGREES": [1, [4, "15"]] }, "fields": {}, "shadow": false, "topLevel": false },
+        "a9": { "opcode": "data_changevariableby", "next": null, "parent": "a8", "inputs": { "VALUE": [1, [4, "1"]] }, "fields": { "VARIABLE": ["score", "varScore"] }, "shadow": false, "topLevel": false },
+        "a10": { "opcode": "motion_movesteps", "next": null, "parent": "a5", "inputs": { "STEPS": [1, [4, "10"]] }, "fields": {}, "shadow": false, "topLevel": false },
+        "a11": { "opcode": "control_wait", "next": null, "parent": "a5", "inputs": { "DURATION": [1, [5, "0.1"]] }, "fields": {}, "shadow": false, "topLevel": false },
+
+        "b1": { "opcode": "event_whenkeypressed", "next": "b2", "parent": null, "inputs": {}, "fields": { "KEY_OPTION": ["space", null] }, "shadow": false, "topLevel": true },
+        "b2": { "opcode": "event_broadcast", "next": null, "parent": "b1", "inputs": { "BROADCAST_INPUT": [1, [11, "jump", "bcJump"]] }, "fields": {}, "shadow": false, "topLevel": false },
+
+        "c1": { "opcode": "event_whenbroadcastreceived", "next": "c2", "parent": null, "inputs": {}, "fields": { "BROADCAST_OPTION": ["jump", "bcJump"] }, "shadow": false, "topLevel": true },
+        "c2": { "opcode": "control_repeat", "next": "c5", "parent": "c1", "inputs": { "TIMES": [1, [6, "10"]], "SUBSTACK": [2, "c3"] }, "fields": {}, "shadow": false, "topLevel": false },
+        "c3": { "opcode": "motion_changeyby", "next": null, "parent": "c2", "inputs": { "DY": [3, "c4", [4, "10"]] }, "fields": {}, "shadow": false, "topLevel": false },
+        "c4": { "opcode": "operator_multiply", "next": null, "parent": "c3", "inputs": { "NUM1": [3, [12, "score", "varScore"], [4, ""]], "NUM2": [1, [4, "2"]] }, "fields": {}, "shadow": false, "topLevel": false },
+        "c5": { "opcode": "procedures_call", "next": null, "parent": "c2", "inputs": { "argH": [1, [4, "50"]] }, "fields": {}, "shadow": false, "topLevel": false, "mutation": { "tagName": "mutation", "proccode": "jump %n", "argumentids": "[\"argH\"]", "warp": "false" } },
+
+        "d1": { "opcode": "procedures_definition", "next": "d3", "parent": null, "inputs": { "custom_block": [1, "d2"] }, "fields": {}, "shadow": false, "topLevel": true },
+        "d2": { "opcode": "procedures_prototype", "next": null, "parent": "d1", "inputs": {}, "fields": {}, "shadow": true, "topLevel": false, "mutation": { "tagName": "mutation", "proccode": "jump %n", "argumentids": "[\"argH\"]", "argumentnames": "[\"height\"]", "argumentdefaults": "[\"1\"]", "warp": "false" } },
+        "d3": { "opcode": "motion_changeyby", "next": null, "parent": "d1", "inputs": { "DY": [3, "d4", [4, "10"]] }, "fields": {}, "shadow": false, "topLevel": false },
+        "d4": { "opcode": "argument_reporter_string_number", "next": null, "parent": "d3", "inputs": {}, "fields": { "VALUE": ["height", null] }, "shadow": false, "topLevel": false }
+      },
+      "costumes": [{ "name": "costume1" }, { "name": "costume2" }],
+      "sounds": [{ "name": "Meow" }]
+    }
+  ],
+  "meta": { "semver": "3.0.0" }
+}
