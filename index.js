@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.0.3";
+  const VERSION = "1.0.4";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
@@ -611,9 +611,23 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
         p("files: " + (files === undefined ? "undefined" : files === null ? "null" : typeof files));
       }
 
-      p("jupyterContext: " + (ctx && ctx.jupyterContext ? typeof ctx.jupyterContext : "absent"));
-      p("guidesPage present: " + !!(ctx && ctx.guidesPage));
-      p("assignmentData present: " + !!(ctx && ctx.assignmentData));
+      p("context.error: " + JSON.stringify(ctx && ctx.error));
+
+      const jc = ctx && ctx.jupyterContext;
+      if (jc && typeof jc === "object") {
+        p("jupyterContext keys: " + Object.keys(jc).join(","));
+        p("jupyterContext sample: " + JSON.stringify(jc).slice(0, 400));
+      } else {
+        p("jupyterContext: " + (jc === undefined ? "undefined" : jc === null ? "null" : typeof jc));
+      }
+
+      const ad = ctx && ctx.assignmentData;
+      if (ad && typeof ad === "object") {
+        p("assignmentData keys: " + Object.keys(ad).join(","));
+        p("assignmentData sample: " + JSON.stringify(ad).slice(0, 500));
+      } else {
+        p("assignmentData present: " + !!ad);
+      }
     } catch (e) {
       p("getContext THREW: " + (e && e.message));
     }
