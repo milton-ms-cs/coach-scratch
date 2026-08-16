@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.0.4";
+  const VERSION = "1.0.5";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
@@ -502,58 +502,92 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
   }
 
   // ============================================================
-  // Workspace scanning
+  // File discovery + reading via codioIDE.files
+  // (codioIDE.workspace does NOT exist in the Custom Assistant runtime;
+  //  getContext().files only lists *open* editor files, never the .sb3.
+  //  The supported channel is the codioIDE.files namespace.)
   // ============================================================
 
-  function findProjectFiles(tree, path) {
-    let found = [];
-    if (!tree || !tree.children) return found;
-    for (const item of tree.children) {
-      const fullPath = path ? path + "/" + item.name : item.name;
-      if (item.name && item.name.charAt(0) === ".") continue;
-      if (item.type === "file") {
-        const lower = item.name.toLowerCase();
-        if (lower.endsWith(".sb3") || lower === "project.json") found.push(fullPath);
-      } else if (item.type === "directory") {
-        found = found.concat(findProjectFiles(item, fullPath));
-      }
+  // getStructure()'s exact shape is undocumented, so walk it defensively:
+  // handle arrays, .children/.contents/.files, and name/path/type variants.
+  function collectProjectPaths(node, prefix, out) {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      for (const child of node) collectProjectPaths(child, prefix, out);
+      return;
     }
-    return found;
+    if (typeof node !== "object") return;
+
+    const name = node.name || node.title || node.label || null;
+    if (name && String(name).charAt(0) === ".") return; // skip dotfiles/dirs
+    const kids = node.children || node.contents || node.files || null;
+    const isDir = node.type === "directory" || node.type === "dir" ||
+                  node.isDir === true || node.isDirectory === true || Array.isArray(kids);
+    const full = node.path || (name ? (prefix ? prefix + "/" + name : name) : prefix);
+
+    if (name && !isDir) {
+      const lower = String(name).toLowerCase();
+      if (lower.endsWith(".sb3") || lower === "project.json") out.push(full);
+    }
+    if (kids) collectProjectPaths(kids, full || prefix, out);
+  }
+
+  // Read one file through codioIDE.files and return its project.json text.
+  async function readProjectJson(F, path) {
+    if (path.toLowerCase().endsWith(".sb3")) {
+      const b64 = await F.getContentBase64(path); // base64 avoids UTF-8 corruption of binary
+      if (typeof b64 !== "string" || b64.length === 0) throw new Error("empty base64");
+      return await extractProjectJson(await toBytes(b64));
+    }
+    const raw = await F.getContent(path);
+    return (typeof raw === "string") ? raw : new TextDecoder("utf-8").decode(await toBytes(raw));
   }
 
   const MAX_PROJECT_CHARS = 30000;
 
   async function getScratchProjectsText() {
-    const sections = [];
+    const F = codioIDE.files;
+    if (!F || typeof F.getContentBase64 !== "function") {
+      return "No Scratch project could be read (Codio files API unavailable). Ask the student to describe their sprites and scripts.";
+    }
+
+    // Discover candidates from the file structure (best effort)...
+    let candidates = [];
     try {
-      if (!codioIDE.workspace || !codioIDE.workspace.getFileTree) {
-        return "No Scratch project could be read (workspace file access is unavailable). Ask the student to describe their sprites and scripts.";
+      if (typeof F.getStructure === "function") {
+        collectProjectPaths(await F.getStructure(), "", candidates);
       }
-      const tree = await codioIDE.workspace.getFileTree();
-      const paths = findProjectFiles(tree, "").slice(0, 3);
-      if (paths.length === 0) {
-        return "No .sb3 file was found in this assignment's workspace. Ask the student whether they have uploaded/saved their Scratch project here, and have them describe their sprites and scripts in the meantime.";
-      }
-      for (const path of paths) {
-        try {
-          const raw = await codioIDE.workspace.readFile(path);
-          let jsonText;
-          if (path.toLowerCase().endsWith(".sb3")) {
-            jsonText = await extractProjectJson(await toBytes(raw));
-          } else {
-            jsonText = (typeof raw === "string") ? raw : new TextDecoder("utf-8").decode(await toBytes(raw));
-          }
-          let text = renderProject(JSON.parse(jsonText));
-          if (text.length > MAX_PROJECT_CHARS) {
-            text = text.substring(0, MAX_PROJECT_CHARS) + "\n...(project truncated — it is very large)";
-          }
-          sections.push("Project file: " + path + "\n" + text);
-        } catch (err) {
-          sections.push("Project file: " + path + "\n(Could not unpack this file: " + (err && err.message ? err.message : "unknown error") + ". Ask the student to describe their sprites and scripts.)");
+    } catch (e) { /* fall back to conventional names below */ }
+
+    // ...and always try the conventional Scratch path directly (a few formats).
+    for (const guess of ["project.sb3", "/project.sb3", "./project.sb3"]) {
+      if (candidates.indexOf(guess) < 0) candidates.push(guess);
+    }
+    candidates = candidates.filter(function(v, i) { return candidates.indexOf(v) === i; });
+
+    const sections = [];
+    const seenBase = {}; // dedup by basename so path-format variants don't double-render
+    const tried = [];
+    for (const path of candidates) {
+      if (sections.length >= 3) break;
+      const base = String(path).replace(/^.*\//, "").toLowerCase();
+      if (seenBase[base]) continue;
+      tried.push(path);
+      try {
+        const jsonText = await readProjectJson(F, path);
+        let text = renderProject(JSON.parse(jsonText));
+        if (text.length > MAX_PROJECT_CHARS) {
+          text = text.substring(0, MAX_PROJECT_CHARS) + "\n...(project truncated — it is very large)";
         }
+        seenBase[base] = true;
+        sections.push("Project file: " + path + "\n" + text);
+      } catch (err) {
+        /* try the next candidate/path format */
       }
-    } catch (err) {
-      return "No Scratch project could be read (" + (err && err.message ? err.message : "unknown error") + "). Ask the student to describe their sprites and scripts.";
+    }
+
+    if (sections.length === 0) {
+      return "No Scratch project could be read. Ask the student to describe their sprites and scripts. (Tried: " + tried.join(", ") + ")";
     }
     return sections.join("\n\n");
   }
@@ -576,68 +610,44 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
     const p = function(s) { L.push(s); };
     p("=== Scratch Coach diagnostics v" + VERSION + " ===");
 
-    // --- getContext(): the supported way coaches receive file content ---
-    try {
-      const ctx = await codioIDE.coachBot.getContext();
-      p("getContext keys: " + Object.keys(ctx || {}).join(","));
-
-      const files = ctx && ctx.files;
-      if (Array.isArray(files)) {
-        p("files: array[" + files.length + "]");
-        for (let i = 0; i < files.length && i < 8; i++) {
-          const f = files[i];
-          if (f && typeof f === "object") {
-            p("file[" + i + "] keys: " + Object.keys(f).join(","));
-            p("  name: " + (f.path || f.name || f.filename || "(none)"));
-            const c = (f.content !== undefined) ? f.content : f.contents;
-            if (typeof c === "string") describeContentString(c, p);
-            else p("  content type: " + typeof c);
-          } else {
-            p("file[" + i + "] (" + typeof f + "): " + JSON.stringify(String(f)).slice(0, 80));
-          }
-        }
-        if (files.length > 8) p("...(" + (files.length - 8) + " more files omitted)");
-      } else if (files && typeof files === "object") {
-        const keys = Object.keys(files);
-        p("files: object with keys: " + keys.slice(0, 12).join(","));
-        for (let i = 0; i < keys.length && i < 8; i++) {
-          const c = files[keys[i]];
-          p("file '" + keys[i] + "':");
-          if (typeof c === "string") describeContentString(c, p);
-          else if (c && typeof c === "object") p("  value keys: " + Object.keys(c).join(","));
-          else p("  value type: " + typeof c);
-        }
-      } else {
-        p("files: " + (files === undefined ? "undefined" : files === null ? "null" : typeof files));
+    const F = codioIDE.files;
+    p("codioIDE.files present: " + !!F);
+    if (F) {
+      p("  getStructure:" + (typeof F.getStructure) +
+        " getContent:" + (typeof F.getContent) +
+        " getContentBase64:" + (typeof F.getContentBase64));
+      try {
+        const st = await F.getStructure();
+        p("getStructure type: " + (Array.isArray(st) ? "array[" + st.length + "]" : typeof st));
+        p("getStructure sample: " + JSON.stringify(st).slice(0, 500));
+      } catch (e) {
+        p("getStructure THREW: " + (e && e.message));
       }
-
-      p("context.error: " + JSON.stringify(ctx && ctx.error));
-
-      const jc = ctx && ctx.jupyterContext;
-      if (jc && typeof jc === "object") {
-        p("jupyterContext keys: " + Object.keys(jc).join(","));
-        p("jupyterContext sample: " + JSON.stringify(jc).slice(0, 400));
-      } else {
-        p("jupyterContext: " + (jc === undefined ? "undefined" : jc === null ? "null" : typeof jc));
-      }
-
-      const ad = ctx && ctx.assignmentData;
-      if (ad && typeof ad === "object") {
-        p("assignmentData keys: " + Object.keys(ad).join(","));
-        p("assignmentData sample: " + JSON.stringify(ad).slice(0, 500));
-      } else {
-        p("assignmentData present: " + !!ad);
-      }
-    } catch (e) {
-      p("getContext THREW: " + (e && e.message));
     }
 
-    // --- workspace API probe (already known absent, kept for completeness) ---
-    const ws = codioIDE.workspace;
-    p("--- workspace probe ---");
-    p("workspace present: " + !!ws);
-    p("getFileTree is function: " + !!(ws && typeof ws.getFileTree === "function"));
-    p("readFile is function: " + !!(ws && typeof ws.readFile === "function"));
+    for (const path of ["project.sb3", "/project.sb3"]) {
+      p("--- getContentBase64(" + JSON.stringify(path) + ") ---");
+      try {
+        const b64 = await F.getContentBase64(path);
+        p("  type:" + typeof b64 + " len:" + (b64 && b64.length));
+        if (typeof b64 === "string" && b64.length) {
+          describeContentString(b64, p);
+          try {
+            const bytes = await toBytes(b64);
+            p("  toBytes len:" + bytes.length + " first4:" + Array.from(bytes.slice(0, 4)).join(","));
+            const json = await extractProjectJson(bytes);
+            const rendered = renderProject(JSON.parse(json));
+            p("  UNPACK OK — rendered " + rendered.length + " chars. Preview:");
+            p(rendered.slice(0, 300));
+          } catch (e) {
+            p("  unpack failed: " + (e && e.message));
+          }
+          break; // got content from this path; no need to try the next format
+        }
+      } catch (e) {
+        p("  getContentBase64 THREW: " + (e && e.message));
+      }
+    }
 
     return L.join("\n");
   }
