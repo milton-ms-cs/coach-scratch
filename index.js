@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
