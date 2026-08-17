@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.2.1";
+  const VERSION = "1.2.2";
 
   const systemPrompt = `You are a friendly and helpful coding coach for middle school students learning Scratch.
 
@@ -643,22 +643,53 @@ For these, tell them exactly what's wrong, on which sprite, and where. They can 
     }
   }
 
+  // Bound any files-API call so a hung deleteFiles/add/getContent can't stall the coach.
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function withTimeout(promise, ms, label) {
+    let t;
+    const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error("timeout: " + label)), ms); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+  }
+
+  // Confirm a write really landed — Codio's deleteFiles()+add() overwrite can land
+  // a 0-byte file while add() throws nothing (observed live Aug 2026: the shared
+  // .coach-log.json was wiped to 0 bytes). Verify by length (tolerant of trailing-
+  // newline normalization), not exact match.
+  async function readbackOk(F, path, content) {
+    if (typeof F.getContent !== "function") return true;
+    try {
+      const got = await withTimeout(F.getContent(path), 8000, "read " + path);
+      return typeof got === "string" && got.length > 0 && got.length >= content.length - 4;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Write and VERIFY. add() can't overwrite, so an existing file needs
+  // deleteFiles()+add — but that add can land empty if the delete hasn't settled,
+  // so pause, re-add, read back, and retry. Never reports success on an empty write.
+  async function addVerified(F, path, content) {
+    try {
+      await withTimeout(F.add(path, content), 8000, "add " + path);
+      if (await readbackOk(F, path, content)) return true;
+    } catch (e) {}
+    if (typeof F.deleteFiles !== "function") return false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { await withTimeout(F.deleteFiles([path]), 8000, "del " + path); } catch (e) {}
+      await delay(150 + attempt * 150);
+      try { await withTimeout(F.add(path, content), 8000, "add " + path); } catch (e) {}
+      if (await readbackOk(F, path, content)) return true;
+      await delay(150);
+    }
+    return false;
+  }
+
   async function saveSessionHistory(history) {
     const F = codioIDE.files;
     if (!F || typeof F.add !== "function") return;
     const text = JSON.stringify(history, null, 2);
-    try {
-      await F.add(SESSION_LOG_PATH, text);
-    } catch (e) {
-      // add() rejects when the file exists — delete and re-add
-      try {
-        if (typeof F.deleteFiles !== "function") return;
-        await F.deleteFiles([SESSION_LOG_PATH]);
-        await F.add(SESSION_LOG_PATH, text);
-      } catch (e2) {
-        // Logging must never break the coach
-      }
-    }
+    await addVerified(F, SESSION_LOG_PATH, text);
   }
 
   // Never block the conversation on a log write — shared pattern, see the coaches
