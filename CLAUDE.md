@@ -8,6 +8,10 @@ Scratch Coach — a Codio Custom Assistant (Virtual Coach) that helps middle sch
 
 This is one of seven coaches in the `coaches/` workspace. **Read the parent `../CLAUDE.md` first** — it documents the shared coach architecture, the `coachBot` API surface, its critical quirks (e.g. `stream`/`modelSettings` are unsupported; custom `context` properties are invisible to the LLM so content must be appended to the user message), the release-per-change deployment flow, and the pedagogical constraints all coaches enforce. This file covers only what is specific to coach-scratch.
 
+## Public repo: no student data, ever
+
+This repository is public, because Codio installs extensions from GitHub. Never commit anything that comes from a real student: names, emails, IDs, their code, questions, transcripts, `.coach-log.json` contents or rows from Codio exports. Paraphrased or "anonymized" snippets count too. Prompt examples and test fixtures must be made up from scratch. Git history is permanent, so check `git diff --cached` before every commit. Full rule: the parent `../CLAUDE.md`.
+
 ## Commands
 
 ```bash
