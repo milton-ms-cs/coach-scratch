@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.4.0";
+  const VERSION = "1.5.0";
 
   const systemPrompt = `You are the Scratch Coach, a friendly coding helper for 6th grade students (about 11 years old) learning Scratch. Use short, simple words.
 
@@ -41,7 +41,7 @@ Scratch basics to remember:
 When helping students:
 - Keep responses short: 2-3 sentences for simple questions, a short paragraph for bigger ideas.
 - Use plain, visual language: "This block tells your sprite to..." not "This invokes..."
-- Be encouraging by naming one specific thing they did right ("Your forever loop keeps the cat moving."). Only say they're close when one small fix is left. Don't start every reply the same way.
+- Be encouraging by naming one specific thing they did right ("Your forever loop keeps the cat moving."). Only say they're close when one small fix is left. After the tag line, don't start every reply with the same words.
 - Always look at the student's actual project (in <project> tags) before answering, and name the project, sprite and script you're talking about. On bug-hunt assignments, follow the ladder below for how much to point at.
 - Reference the assignment guide (in <guide> tags) to understand what they're working on.
 - If the student sends only a pasted block name, or only a few words with no question: ask one short question first: "What did you expect it to do, and what happened instead?" You may point at one obvious problem in the same reply, but don't rebuild their script until you know what they want. If they send an error message or a message about something not working, explain it as usual.
@@ -858,140 +858,162 @@ Suggest asking the teacher when something really needs a human: Codio itself see
   }
 
   // ============================================================
-  // Strict mode: a nudge toward trying first for students who lean on the coach.
-  // Turned on from this workspace's own .coach-log.json history, never from a
-  // list of students. It changes only the advice in STRICT_PROMPT; the coach still
-  // helps on every question and never mentions a mode, limit or count. Thresholds
-  // are here so the monthly review can tune them.
+  // Try-first help (strict mode), with the model's judgment and the code's memory.
+  // Each reply starts with a hidden tag labelling the student's CURRENT message:
+  // [[ask]] (wants the next step, the code or a check instead of trying), [[attempt]]
+  // (shows or describes their own try), or [[other]]. The code keeps those labels in
+  // the box's log and, before every reply, tells the model in <recent_questions> which
+  // kind of help each label gets this turn: try-first when this would be the 3rd ask
+  // in their last 5 questions since their last attempt, or while try-first is already on (until an attempt).
+  // The tag is stripped before the student sees the reply (ask() runs with
+  // stream:false, then write()) and kept in the chat history so the model keeps
+  // tagging. Backstop: STRICT_SESSION_QUESTIONS questions in a session means try-first.
+  // The log is per box (one student, one assignment), so nothing carries over.
   // ============================================================
-  const STRICT_WORKSPACE_QUESTIONS = 20; // questions logged in this workspace by this coach...
-  const STRICT_WORKSPACE_DAYS = 14;      // ...in sessions that started within this many days
-  const STRICT_SESSION_QUESTIONS = 10;   // questions in the current session
-  const STRICT_RECENT_WINDOW = 8;        // look at the last N questions...
-  const STRICT_RECENT_NEXT_STEP = 5;     // ...and turn on if this many are "next step" asks
-  const STRICT_RELEASE_ATTEMPTS = 2;     // own attempts in a row that turn it off for the session
+  const STRICT_SESSION_QUESTIONS = 10; // backstop: questions in the current session
+  const STRICT_WORKSPACE_DAYS = 14;    // only sessions that started within this many days
+  const TRY_FIRST_ASKS = 3;            // asks among the last TRY_FIRST_WINDOW questions that switch it on
+  const TRY_FIRST_WINDOW = 5;
+  const RECENT_QUESTIONS_SHOWN = 10;   // questions listed in <recent_questions>
+  const RECENT_QUESTION_CHARS = 160;   // each one cut to this length
+  const MODE_LABELS = ["ask", "attempt", "other"];
 
-  const NEXT_STEP_PATTERNS = [
-    /^(ok(ay)? )?(so )?(what'?s |what is )?(the )?next( step| part| one)?( please| pls)?$/,
-    /^(ok(ay)? )?(and )?then what$/,
-    /^(what goes |the )?next (line|bit)$/,
-    /^what goes next$/,
-    /^(keep going|continue|go on|more)( please| pls)?$/,
-    /^(and|ok) (then|now)$/,
-    /^(idk|i don'?t know|i dunno)( what to do| what to write)?$/,
-    /\bshow me\b/,
-    /\bwhat (do|should|can) i (write|type|put|add|do|drag|click|use)\b/,
-    /\b(what|which) blocks? (do|should|can) i (use|add|drag|put|need)\b/,
-    /^which blocks?$/,
-    /\bwhat'?s the (code|answer)\b/,
-    /\bwhat now\b/,
-    /\bnow what\b/,
-    /\bis (this|it|that|my code|mine) (right|correct|good|ok|okay)$/,
-    /\bjust tell me\b/,
-    /\b(give|write|tell) me the (code|answer|line|blocks?)\b/,
-    /\b(can|could) you (just )?(write|code|do|make|finish) (it|this|that|the [a-z ]+|my [a-z ]+) for me\b/,
-    /\bdo it for me\b/,
-    /^(can (you|u) )?(just )?fix (it|this|that|my [a-z]+)( for me)?( please| pls)?$/,
-    /^can (you|u) (just )?do it$/
-  ];
-
-  function normalizeAsk(text) {
-    return String(text || "").toLowerCase().replace(/[‘’]/g, "'").replace(/[^a-z0-9' ?\n]+/g, " ").replace(/[ \t]+/g, " ").trim();
-  }
-
-  const CODE_WORDS = ["if", "elif", "else", "for", "in", "while", "def", "return", "and", "or", "not", "is", "import", "from", "as", "true", "false", "none", "pass", "break", "with", "class", "let", "const", "var", "function"];
-
-  // A paste of code with no question, no error and no sentence of their own in it.
-  // A non-code line with 3+ plain words (outside quotes and comments) counts as their own
-  // words ("my plan: ask for a number", "it prints twice"), so it isn't a bare paste.
-  function isBarePaste(text) {
-    const s = String(text || "");
-    if (s.length < 12 || s.indexOf("?") !== -1) return false;
-    if (!/[=(){}\[\]:<>;]/.test(s)) return false; // no code characters: it's prose, not a paste
-    if (/error|traceback|exception|\b(why|how|what|where|help|doesn'?t|isn'?t|won'?t|can'?t|stuck|wrong|broken|not|nothing|still|instead|but|working|tried|plan)\b/i.test(s)) return false;
-    return !s.split("\n").some(function(line) {
-      const bare = line.replace(/(["'])(?:(?!\1).)*\1/g, " ").replace(/(#|\/\/).*$/, " ");
-      if (/[=(){}\[\]:<>;+*\/-]/.test(bare)) return false; // a code line
-      const plain = bare.split(/\s+/).filter(function(w) { return /^[a-z]+[.,!]?$/i.test(w) && CODE_WORDS.indexOf(w.toLowerCase()) === -1; });
-      return plain.length >= 3;
-    });
-  }
-
-  function isNextStepPhrase(text) {
-    const norm = normalizeAsk(text).replace(/\?/g, "").trim();
-    if (!norm || norm.split(/\s+/).length > 10) return false;
-    if (/error|traceback|\b(run|running|tried|try|plan)\b/.test(norm)) return false; // normal help
-    return NEXT_STEP_PATTERNS.some(function(p) { return p.test(norm); });
-  }
-
-  function isNextStepAsk(text) {
-    return isBarePaste(text) || isNextStepPhrase(text);
-  }
-
-  // The student is working on their own: they changed their files, or wrote a real
-  // message (a plan, an explanation, a specific question) instead of a "next" ask.
-  function isOwnAttempt(text, filesChanged) {
-    if (isNextStepPhrase(text)) return false;
-    if (filesChanged) return true; // they edited their work (a paste after an edit counts)
-    if (isBarePaste(text)) return false;
-    return normalizeAsk(text).split(/\s+/).filter(Boolean).length >= 6;
-  }
-
-  // Returns the threshold that fired ("workspace", "session" or "next-steps"), or null.
-  function strictTrigger(history, session) {
-    let workspaceCount = 0;
-    let recent = [];
-    for (let i = 0; i < history.length; i++) {
-      const s = history[i];
-      if (!s || typeof s !== "object" || s.coach !== COACH_ID) continue; // this coach's sessions only
-      const qs = Array.isArray(s.questions) ? s.questions : [];
+  // This coach's recent questions in this box (last STRICT_WORKSPACE_DAYS days, this
+  // session included), each with the label the model gave it (null if none yet).
+  function recentQuestionList(history, session) {
+    let total = 0;
+    let items = [];
+    const list = Array.isArray(history) ? history : [];
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (!s || typeof s !== "object" || s.coach !== COACH_ID) continue;
       const startedMs = Date.parse(s.started);
-      if (s !== session && !(startedMs > Date.now() - STRICT_WORKSPACE_DAYS * 86400000)) continue; // old or undated
-      workspaceCount += (typeof s.exchanges === "number" && s.exchanges >= qs.length) ? s.exchanges : qs.length;
-      recent = recent.concat(qs.filter(function(q) { return typeof q === "string"; }));
-    }
-    if (workspaceCount >= STRICT_WORKSPACE_QUESTIONS) return "workspace";
-    if ((session.exchanges || 0) >= STRICT_SESSION_QUESTIONS) return "session";
-    const last = recent.slice(-STRICT_RECENT_WINDOW);
-    if (last.filter(isNextStepAsk).length >= STRICT_RECENT_NEXT_STEP) return "next-steps";
-    return null;
-  }
-
-  // Call once per question, after recordTurn() (so `history` includes this session and
-  // this question). Updates the session's log fields; the next queued save carries them.
-  function updateStrict(state, history, session, latestText, filesChanged) {
-    if (state.released) return state; // off for the rest of this session
-    if (state.on) {
-      state.attemptStreak = isOwnAttempt(latestText, filesChanged) ? state.attemptStreak + 1 : 0;
-      if (state.attemptStreak >= STRICT_RELEASE_ATTEMPTS) {
-        state.on = false;
-        state.released = true;
-        session.strictReleased = true;
+      if (s !== session && !(startedMs > Date.now() - STRICT_WORKSPACE_DAYS * 86400000)) continue;
+      const qs = Array.isArray(s.questions) ? s.questions : [];
+      const labels = Array.isArray(s.labels) ? s.labels : [];
+      total += (typeof s.exchanges === "number" && s.exchanges >= qs.length) ? s.exchanges : qs.length;
+      for (let j = 0; j < qs.length; j++) {
+        if (typeof qs[j] === "string") items.push({ q: qs[j], label: MODE_LABELS.indexOf(labels[j]) !== -1 ? labels[j] : null });
       }
-      return state;
     }
-    const reason = strictTrigger(history, session);
-    if (reason) {
-      state.on = true;
-      state.reason = reason;
-      state.attemptStreak = 0;
-      session.strict = true;
-      session.strictReason = reason;
-    }
-    return state;
+    return { total: total, items: items };
   }
 
-  const STRICT_PROMPT = `
+  // Which help each possible label of the CURRENT question gets this turn.
+  function modeRule(history, session) {
+    const recent = recentQuestionList(history, session);
+    let prior = recent.items.slice(0, -1).slice(-(TRY_FIRST_WINDOW - 1));
+    let lastAttempt = -1;
+    prior.forEach(function(it, i) { if (it.label === "attempt") lastAttempt = i; });
+    prior = prior.slice(lastAttempt + 1); // an attempt starts the count over
+    const priorAsks = prior.filter(function(it) { return it.label === "ask"; }).length;
+    const modes = Array.isArray(session.modes) ? session.modes : [];
+    const lastMode = modes.length ? modes[modes.length - 1] : "normal";
+    if ((session.exchanges || 0) >= STRICT_SESSION_QUESTIONS) {
+      return { ask: "try-first", attempt: "try-first", other: "try-first", backstop: true, recent: recent };
+    }
+    return {
+      ask: (priorAsks + 1 >= TRY_FIRST_ASKS || lastMode === "try-first") ? "try-first" : "normal",
+      attempt: "normal",
+      other: lastMode === "try-first" ? "try-first" : "normal",
+      backstop: false,
+      recent: recent
+    };
+  }
 
-## Right now: help this student try first
+  // The <recent_questions> block for messages[0]. Rebuilt every turn after recordTurn().
+  function recentQuestionsBlock(history, session) {
+    const rule = modeRule(history, session);
+    const shown = rule.recent.items.slice(-RECENT_QUESTIONS_SHOWN).map(function(it, i, arr) {
+      const one = it.q.replace(/\s+/g, " ").trim();
+      const cut = one.length > RECENT_QUESTION_CHARS ? one.slice(0, RECENT_QUESTION_CHARS) + "..." : one;
+      const tag = (i === arr.length - 1) ? "[current]" : "[" + (it.label || "?") + "]";
+      return (i + 1) + ". " + tag + " " + cut;
+    });
+    const big = function(m) { return m === "try-first" ? "TRY-FIRST help" : "NORMAL help"; };
+    return "<recent_questions>\n" +
+      "Questions to you in this assignment in the last " + STRICT_WORKSPACE_DAYS + " days: " + rule.recent.total +
+      ". In this session: " + (session.exchanges || 0) + ".\n" +
+      (shown.length ? "Their recent questions, oldest first, with the label you gave each:\n" + shown.join("\n") : "No earlier questions.") +
+      "\nFor the current question, label it and give this help:\n" +
+      "- [[ask]]: " + big(rule.ask) + "\n" +
+      "- [[attempt]]: " + big(rule.attempt) + "\n" +
+      "- [[other]]: " + big(rule.other) + "\n" +
+      "</recent_questions>";
+  }
 
-This student has been leaning on you for the next step. Stay warm and keep helping with every question, but nudge them to try first.
-- Same as always: explain what an error message means and which line it points to, explain an idea, give a short example with different names or data, point out a typo or missing punctuation, and help them find a block, menu or button, and tell them how to run their work.
+  // Reads and strips the hidden tag line. Returns the label (null if missing) and the
+  // cleaned text. Tolerates ** or backtick wrappers, # or >, one closing bracket, a
+  // trailing colon, and extra words like "[[ask | try-first]]".
+  function readModeTag(reply) {
+    const text = String(reply || "");
+    const nl = text.search(/\n|$/);
+    const first = text.slice(0, nl);
+    let label = null;
+    let rest = text;
+    // Strip only the tag itself, so "[[ask]] What did you try?" keeps its words.
+    const lead = first.match(/^\s*[#*_`> \t]*\[\[\s*(ask|attempt|other|try-first|normal)\b([^\]\n]{0,30}\]\]|\]{0,2})[*_`:]*[ \t]*/i);
+    if (lead) {
+      const w = lead[1].toLowerCase();
+      label = MODE_LABELS.indexOf(w) !== -1 ? w : null;
+      rest = first.slice(lead[0].length) + text.slice(nl);
+    }
+    const clean = rest
+      .replace(/[*_`]*\[\[\s*(ask|attempt|other|try-first|normal)(\s*\|[^\]\n]{0,30})?\s*\]\][*_`:]*[ \t]*/gi, "") // stray copies
+      .replace(/^\s+/, "");
+    return { label: label, text: clean };
+  }
+
+  // The chat-history copy of a reply keeps its tag line (only the student's view is
+  // cleaned), so the model keeps seeing itself tag every reply.
+  function historyReply(tagged) {
+    return "[[" + (tagged.label || "other") + "]]\n" + tagged.text;
+  }
+
+  // Call after every non-empty reply, with the rule used for this turn (from
+  // modeRule(), computed when this turn's context was built) and the tag read from the
+  // reply. Logs the label and the mode; the next queued save carries them.
+  function recordMode(session, rule, label) {
+    const mode = rule[label || "other"];
+    if (!Array.isArray(session.labels)) session.labels = [];
+    if (!Array.isArray(session.modes)) session.modes = [];
+    // labels line up with questions: pad for any earlier question that got no reply
+    while (session.labels.length < (session.questions || []).length - 1) session.labels.push(null);
+    while (session.modes.length < session.labels.length) session.modes.push(null);
+    if (session.labels.length < MAX_LOGGED_QUESTIONS) session.labels.push(label);
+    if (session.modes.length < MAX_LOGGED_QUESTIONS) session.modes.push(mode);
+    if (mode === "try-first") {
+      session.strictReleased = false;
+      if (!session.strict) {
+        session.strict = true;
+        session.strictReason = rule.backstop ? "backstop" : "model";
+      }
+    } else if (session.strict) {
+      session.strictReleased = true; // went back to normal help after try-first
+    }
+    return mode;
+  }
+
+  const TRY_FIRST_PROMPT = `
+
+## Try-first help: label each message
+
+Each message includes <recent_questions>: the student's recent questions to you in this assignment and the label you gave each one. Start EVERY reply with one hidden tag line that labels the student's CURRENT message, then your reply on the next line:
+- [[ask]]: they want you to give them the next step, the code, or a check instead of trying something themselves. Judge the meaning in any wording: "now what", "how do I do that", "what goes next", "can you tell me how to...", "is this right?", "like that?", "show me", a bare paste with no question.
+- [[attempt]]: THIS message shows or describes something new they tried since your last reply (what they changed, what happened when they ran it, or their own plan), or it starts with the note that their files changed. Code that was already in their files does not make a message an attempt.
+- [[other]]: anything else, including pasting a real error message, asking what something means or how something works, asking how to run their code, asking where to find a block, menu or button, or answering a question you asked.
+Label the student's words, not their files. Examples: "how do I do that" [[ask]]; "like that?" [[ask]]; "show me" [[ask]]; "and then" [[ask]]; "NameError: name 'x' is not defined" [[other]]; "what does int() do?" [[other]]; "I added an if but it prints both times" [[attempt]]; "I think I should use a loop that adds 1 each time" [[attempt]].
+Then give the kind of help <recent_questions> lists for that label. The student never sees the tag. Never mention it, the labels, the mode, or their question count.
+
+Try-first help means: stay warm and keep helping with every question, but nudge them to try first.
+- Same as always: explain what an error message means and which line it points to, explain an idea, give a short example with different names or data, point out a typo or missing punctuation, help them find a block, menu or button, and tell them how to run their work.
 - For "what do I write", "next" or "show me" questions, first ask one short question back ("What do you think the next step is?" or "What did you try?") and wait for their answer. If they answer with a real attempt, even a wrong one, help as usual from there.
 - Don't write the lesson's main step in their own work (their condition, their loop, their counter, their blocks). Show the pattern with different names and let them adapt it. If they ask twice for that step, give a parallel example, not their finished line. Fixing a typo or missing punctuation in a line they already wrote is still fine.
 - After about three "next step" asks in a row, suggest they run what they have and see what happens, or ask them to explain their plan in one sentence.
 - If they've been stuck on the same thing for three or more turns, kindly suggest their teacher, for example: "This one might be easier to sort out with your teacher. If you're in class, ask them now. If you're working at home, send them a message about where you're stuck." That's a suggestion, never a refusal. Keep helping too.
 - Never mention a mode, a limit or how many questions they've asked, and never refuse. You're a coach who wants them to try first.`;
+
+  const fullSystemPrompt = systemPrompt + TRY_FIRST_PROMPT;
 
 
   async function onButtonPress() {
@@ -1045,10 +1067,11 @@ This student has been leaning on you for the next step. Stay warm and keep helpi
       contextFingerprints: [],
       strict: false,
       strictReason: null,
-      strictReleased: false
+      strictReleased: false,
+      modes: [],
+      labels: []
     };
-    const strictState = { on: false, reason: null, released: false, attemptStreak: 0 };
-    const promptFor = function() { return strictState.on ? systemPrompt + STRICT_PROMPT : systemPrompt; };
+    const promptFor = function() { return fullSystemPrompt; };
     sessionHistory.push(session);
 
     function recordTurn(question) {
@@ -1117,6 +1140,7 @@ Here is the assignment guide:
 <guide>
 ${guideContent}
 </guide>
+${recentQuestionsBlock(sessionHistory, session)}
 ${assignmentName ? `\nAssignment: ${assignmentName}\n` : ''}
 ${ending}`;
     }
@@ -1142,26 +1166,30 @@ ${ending}`;
     // Used when the context can't be built at all: no files, so the model says it can't see them.
     function fallbackContext(question) {
       lastFilesBlock = "(I couldn't read the student's files just now.)";
-      return "Here are the student's Scratch project(s):\n<project>\n" + lastFilesBlock + "\n</project>\n\nThe student says: " + question;
+      return "Here are the student's Scratch project(s):\n<project>\n" + lastFilesBlock + "\n</project>\n" + recentQuestionsBlock(sessionHistory, session) + "\n\nThe student says: " + question;
     }
 
     // Shared reply handling for every ask(): never keep an empty assistant turn.
     function handleReply(result) {
-      const reply = (result && typeof result.result === "string") ? result.result : "";
-      if (!reply.trim()) {
+      const raw = (result && typeof result.result === "string") ? result.result : "";
+      const tagged = readModeTag(raw);
+      const rule = modeRule(sessionHistory, session); // same state the context block was built from
+      if (!tagged.text.trim()) {
         // An empty message in the history can make every later ask() fail too
         // (seen live: one session got 10 empty replies in a row).
         session.failedReplies = (session.failedReplies || 0) + 1;
         codioIDE.coachBot.write("Hmm, I didn't get an answer that time. Please ask again!");
         messages.pop(); // drop the user turn that got no answer
       } else {
-        messages.push({ role: "assistant", content: reply });
+        recordMode(session, rule, tagged.label);
+        // ask() ran with stream:false, so we show the reply ourselves, without the hidden tag.
+        codioIDE.coachBot.write(tagged.text, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
+        messages.push({ role: "assistant", content: historyReply(tagged) }); // tag kept in history so the model keeps tagging
         if (pendingHash !== null) lastAnsweredHash = pendingHash; // advance only after a real answer
       }
     }
 
     recordTurn(initialInput);
-    updateStrict(strictState, sessionHistory, session, initialInput, false);
 
     // Unpack the student's .sb3 project(s) into readable text
     codioIDE.coachBot.showThinkingAnimation();
@@ -1185,7 +1213,7 @@ ${ending}`;
       const result = await codioIDE.coachBot.ask({
         systemPrompt: promptFor(),
         messages: messages
-      }, { preventMenu: true });
+      }, { stream: false, preventMenu: true });
       handleReply(result);
     } catch (e) {
       session.failedReplies = (session.failedReplies || 0) + 1;
@@ -1227,7 +1255,6 @@ ${ending}`;
             ctxMsg = fallbackContext(input);
           }
           noteContextFingerprint();
-          updateStrict(strictState, sessionHistory, session, input, false);
           messages.push({ role: "user", content: ctxMsg });
         } else {
           // Refresh messages[0] from the student's latest files (keep the old one on failure).
@@ -1237,7 +1264,6 @@ ${ending}`;
             messages[0] = { role: "user", content: fresh };
             changed = noteContextFingerprint();
           } catch (e) { changed = false; noteContextFingerprint(true); }
-          updateStrict(strictState, sessionHistory, session, input, changed);
           messages.push({
             role: "user",
             content: changed ? "(Note: the student's files have changed since your last reply.)\n\n" + input : input
@@ -1247,7 +1273,7 @@ ${ending}`;
         const result = await codioIDE.coachBot.ask({
           systemPrompt: promptFor(),
           messages: messages
-        }, { preventMenu: true });
+        }, { stream: false, preventMenu: true });
         handleReply(result);
       } catch (e) {
         session.failedReplies = (session.failedReplies || 0) + 1;
@@ -1272,6 +1298,6 @@ ${ending}`;
   }
 
   // Exposed for the Node test harness in test/ — unused inside Codio.
-  window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject, collectProjectPaths, isExitMessage, orderProjectPaths, getScratchProjectsText, systemPrompt };
+  window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject, collectProjectPaths, isExitMessage, readModeTag, orderProjectPaths, getScratchProjectsText, systemPrompt };
 
 })(window.codioIDE, window);

@@ -189,7 +189,8 @@ eval(src);
             if (typeof item === "object" && item !== null) { if (item.before) item.before(env); return item.text; }
             return item;
           },
-          ask: async function(args) {
+          ask: async function(args, o) {
+            if (!o || o.stream !== false || o.preventMenu !== true) throw new Error("ask() must be called with { stream: false, preventMenu: true }");
             env.prompts.push(args.systemPrompt);
             env.asks.push(JSON.parse(JSON.stringify(args.messages)));
             return opts.ask ? opts.ask(env.asks.length, args.messages) : { result: "reply " + env.asks.length };
@@ -273,7 +274,7 @@ eval(src);
     const a2 = env.asks[1];
     check(a2.length === 1 && a2[0].content.indexOf("what about the score?") >= 0 && a2[0].content.indexOf("<project>") >= 0,
       "after a failed first reply the new question gets full context as the only message");
-    check(a2[0].content.indexOf("why does my cat spin?") < 0, "the old first question is not carried over after a failed first reply");
+    check(a2[0].content.indexOf("The student says: what about the score?") >= 0 && a2[0].content.indexOf("first question in this chat") < 0, "the old first question is not presented as current after a failed first reply");
     const a3 = env.asks[2];
     check(a3.every(function(m) { return m.content && m.content.trim(); }), "no empty message in history");
     check(a3.length === 1, "failed replies leave no assistant turns (got " + a3.length + " messages)");
@@ -468,86 +469,124 @@ eval(src);
   }
 
   // ============================================================
-  // Strict mode, loadSessionHistory empty-structure guard, refresh getContext failure
+  // Try-first help: the model labels the CURRENT message ([[ask]]/[[attempt]]/[[other]]);
+  // the code decides the help from the labels in the log and says so in <recent_questions>
   // ============================================================
-  const STRICT_MARK = "## Right now: help this student try first";
-  const isStrict = function(prompt) { return prompt.indexOf(STRICT_MARK) >= 0; };
-  const own = [
-    "I want the cat to move right when I press the arrow key",
-    "I think the score block needs to go inside the forever loop"
-  ];
+  const iso = function(daysAgo) { return new Date(Date.now() - daysAgo * 86400000).toISOString(); };
+  const scripted = function(replies) { return function(n) { return { result: replies[n - 1] }; }; };
 
-  // workspace history of 20 questions turns it on from the first ask
+  // tag parsing
   {
-    const qs = []; for (let i = 0; i < 20; i++) qs.push("old question " + i);
-    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, existingLog: JSON.stringify([{ coach: "scratch", started: new Date(Date.now() - 86400000).toISOString(), exchanges: 20, questions: qs }]), inputs: ["why does my cat spin around so fast?", "bye"] });
+    const rt = makeEnv({}).test.readModeTag;
+    const eq = function(r, label, text, name) { check(r.label === label && r.text === text, "readModeTag " + name + ": " + JSON.stringify(r)); };
+    eq(rt("[[ask]]\nHi"), "ask", "Hi", "[[ask]]");
+    eq(rt("**[[other]]**\nHi"), "other", "Hi", "bold");
+    eq(rt("`[[ask | try-first]]`\nHi"), "ask", "Hi", "backticks with extra words");
+    eq(rt("## [[attempt]\nHi"), "attempt", "Hi", "heading, one closing bracket");
+    eq(rt("Just text"), null, "Just text", "missing tag");
+    eq(rt("[[ask]]\nFirst. [[try-first]] second."), "ask", "First. second.", "stray tag mid-text");
+    eq(rt("Use [[1,2]] here"), null, "Use [[1,2]] here", "[[1,2]] untouched");
+    eq(rt("[[ask]]"), "ask", "", "tag only");
+  }
+
+  // end to end: tag never reaches write(); history keeps the tag; tag-only reply = empty-reply path
+  {
+    const env = makeEnv({
+      files: { "project.sb3": fixtureBytes },
+      inputs: ["next please", "ok so what now", "hello", "bye"],
+      ask: scripted(["[[ask]]\nWhat do you think the next step is?", "**[[other]]**\nGreat, that works.", "[[attempt]]\n  "])
+    });
     await env.run();
-    check(isStrict(env.prompts[0]), "strict: workspace history of 20 questions -> STRICT_PROMPT on the first ask");
-    const log = env.log();
-    const mine = log[log.length - 1];
-    check(mine.strict === true && mine.strictReason === "workspace", "strict: workspace reason logged (" + mine.strictReason + ")");
-    check(mine.strictReleased === false, "strict: strictReleased false by default");
+    check(env.writes.indexOf("What do you think the next step is?") >= 0 && env.writes.indexOf("Great, that works.") >= 0, "tag stripped before write()");
+    check(env.writes.every(function(w) { return w.indexOf("[[") < 0; }), "no tag ever reaches write()");
+    check(env.asks[1][1].content === "[[ask]]\nWhat do you think the next step is?", "history entry starts with its tag: " + JSON.stringify(env.asks[1][1]));
+    check(env.asks[2][3].content === "[[other]]\nGreat, that works.", "history keeps the cleaned label for a decorated tag");
+    check(env.writes.some(function(w) { return w.indexOf("didn't get an answer") >= 0; }), "tag-only reply uses the empty-reply path");
+    check(env.asks.length === 3 && env.asks[2].length === 5, "tag-only reply not in history");
+    const log = env.log()[0];
+    check(log.failedReplies === 1 && log.labels.length === 2, "tag-only reply: failedReplies counted, no label logged");
+    check(env.prompts.every(function(p) { return p.indexOf("## Try-first help: label each message") >= 0; }), "try-first prompt always present");
   }
-  // old (30-day) or other-coach sessions don't count toward the workspace threshold
+  // missing tag = other, logged as such
   {
-    const qs = []; for (let i = 0; i < 20; i++) qs.push("old question " + i);
-    const old30 = new Date(Date.now() - 30 * 86400000).toISOString();
-    const recent = new Date(Date.now() - 86400000).toISOString();
-    const logs = [
-      [{ coach: "scratch", started: old30, exchanges: 20, questions: qs }],
-      [{ coach: "python", started: recent, exchanges: 20, questions: qs }]
-    ];
-    for (const lg of logs) {
-      const env = makeEnv({ files: { "project.sb3": fixtureBytes }, existingLog: JSON.stringify(lg), inputs: ["why does my cat spin around so fast?", "bye"] });
-      await env.run();
-      check(!isStrict(env.prompts[0]), "strict: old or other-coach sessions do not count (" + lg[0].coach + ")");
-    }
+    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, inputs: ["one", "bye"], ask: scripted(["Just text, no tag."]) });
+    await env.run();
+    check(env.writes.indexOf("Just text, no tag.") >= 0, "missing tag: shown as-is");
+    check(env.asks.length === 1 && env.log()[0].labels[0] === null && env.log()[0].modes[0] === "normal", "missing tag treated as other/normal");
   }
-  // fresh workspace: off at first, on after the 10th question in a session
+  // chain: ask, ask, ask, other, attempt, ask
+  {
+    const env = makeEnv({
+      files: { "project.sb3": fixtureBytes },
+      inputs: ["how do I do that", "like that?", "show me", "what does this block mean for the cat", "I added a wait block inside the loop", "and then", "bye"],
+      ask: scripted(["[[ask]]\nA", "[[ask]]\nB", "[[ask]]\nC", "[[other]]\nD", "[[attempt]]\nE", "[[ask]]\nF"])
+    });
+    await env.run();
+    const log = env.log()[0];
+    check(JSON.stringify(log.labels) === JSON.stringify(["ask", "ask", "ask", "other", "attempt", "ask"]), "labels logged: " + JSON.stringify(log.labels));
+    check(JSON.stringify(log.modes) === JSON.stringify(["normal", "normal", "try-first", "try-first", "normal", "normal"]), "modes logged: " + JSON.stringify(log.modes));
+    check(log.strict === true && log.strictReason === "model" && log.strictReleased === true, "strict fields: " + JSON.stringify([log.strict, log.strictReason, log.strictReleased]));
+    const c2 = env.asks[1][0].content;
+    check(c2.indexOf("1. [ask] how do I do that") >= 0 && c2.indexOf("2. [current] like that?") >= 0, "turn 2 lists turn 1 with its label and the current question");
+    check(c2.indexOf("- [[ask]]: NORMAL help") >= 0 && c2.indexOf("- [[attempt]]: NORMAL help") >= 0 && c2.indexOf("- [[other]]: NORMAL help") >= 0, "turn 2 per-label help lines");
+    const c3 = env.asks[2][0].content;
+    check(c3.indexOf("- [[ask]]: TRY-FIRST help") >= 0 && c3.indexOf("- [[other]]: NORMAL help") >= 0, "turn 3: a third ask gets try-first");
+    check(env.asks[3][0].content.indexOf("- [[other]]: TRY-FIRST help") >= 0, "turn 4: other stays try-first while it is on");
+    check(env.asks[5][0].content.indexOf("- [[ask]]: NORMAL help") >= 0, "turn 6: the count restarts after an attempt");
+  }
+  // earlier sessions count when recent and same coach; old and other-coach ones don't
+  {
+    const mk = function(coach, daysAgo, qs, labels) { return { coach: coach, started: iso(daysAgo), exchanges: qs.length, questions: qs, labels: labels }; };
+    const twoAsks = [mk("scratch", 1, ["what next", "and then"], ["ask", "ask"])];
+    const env1 = makeEnv({ files: { "project.sb3": fixtureBytes }, existingLog: JSON.stringify(twoAsks), inputs: ["show me", "bye"], ask: scripted(["[[ask]]\nok"]) });
+    await env1.run();
+    check(env1.asks[0][0].content.indexOf("- [[ask]]: TRY-FIRST help") >= 0, "recent same-coach asks count toward try-first");
+    const noCount = [mk("scratch", 30, ["what next", "and then"], ["ask", "ask"]), mk("python", 1, ["what next", "and then"], ["ask", "ask"])];
+    const env2 = makeEnv({ files: { "project.sb3": fixtureBytes }, existingLog: JSON.stringify(noCount), inputs: ["show me", "bye"], ask: scripted(["[[ask]]\nok"]) });
+    await env2.run();
+    const c = env2.asks[0][0].content;
+    check(c.indexOf("- [[ask]]: NORMAL help") >= 0 && c.indexOf("what next") < 0, "30-day-old and other-coach sessions don't count");
+    check(c.indexOf("<recent_questions>") > c.indexOf("</guide>") && c.indexOf("<recent_questions>") > c.indexOf("</project>"), "recent_questions sits after </guide>, outside <project>");
+  }
+  // backstop: the 10th question in a session
   {
     const inputs = []; for (let i = 1; i <= 11; i++) inputs.push("what does the number " + i + " change in my cat sprite script");
     inputs.push("bye");
-    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, inputs: inputs });
+    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, inputs: inputs, ask: function() { return { result: "[[other]]\nSure." }; } });
     await env.run();
-    check(env.prompts.slice(0, 9).every(function(p) { return !isStrict(p); }), "strict: off for the first 9 questions");
-    check(isStrict(env.prompts[9]), "strict: on at the 10th question");
-    const log = env.log();
-    check(log[0].strict === true && log[0].strictReason === "session", "strict: session reason logged (" + log[0].strictReason + ")");
-  }
-  // 5 "next" asks in a row; then two real attempts release it for the session
-  {
-    const env = makeEnv({
-      files: { "project.sb3": fixtureBytes },
-      inputs: ["next", "next", "show me", "next step", "what do I do now", own[0], own[1], "next", "show me", "next", "bye"]
-    });
-    await env.run();
-    check(env.prompts.slice(0, 4).every(function(p) { return !isStrict(p); }), "strict: off for the first 4 next-asks");
-    check(isStrict(env.prompts[4]) && isStrict(env.prompts[5]), "strict: on after 5 next-style asks and for the first attempt");
-    check(!isStrict(env.prompts[6]), "strict: two own attempts in a row turn it off");
-    check(env.prompts.slice(6).every(function(p) { return !isStrict(p); }), "strict: stays off even if more 'next' asks follow");
+    const big = function(c) { return (c.match(/TRY-FIRST help/g) || []).length; };
+    check(big(env.asks[8][0].content) === 0, "backstop: not before the 10th question");
+    check(big(env.asks[9][0].content) === 3, "backstop: the 10th question lists TRY-FIRST for all three labels");
     const log = env.log()[0];
-    check(log.strict === true && log.strictReason === "next-steps" && log.strictReleased === true, "strict: next-steps + strictReleased logged: " + JSON.stringify([log.strict, log.strictReason, log.strictReleased]));
+    check(log.modes[9] === "try-first" && log.modes[8] === "normal", "backstop: mode logged as try-first from the 10th question");
+    check(log.strict === true && log.strictReason === "backstop", "backstop reason logged: " + log.strictReason);
   }
-  // a turn where the files changed counts as an attempt
+  // recent_questions never changes the files fingerprint or fires the files-changed note
   {
-    const changedA = makeSb3(tinyProject("Rocket", 2)), changedB = makeSb3(tinyProject("Rocket", 3));
-    const env = makeEnv({
-      files: { "project.sb3": fixtureBytes },
-      inputs: ["next", "next", "next", "next", "next",
-        { text: "ok", before: function(e) { e.files["project.sb3"] = changedA; } },
-        { text: "hmm", before: function(e) { e.files["project.sb3"] = changedB; } },
-        "next", "bye"]
-    });
+    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, inputs: ["why does my cat spin?", "and what about the score?", "bye"], ask: function() { return { result: "[[other]]\nok" }; } });
     await env.run();
-    check(isStrict(env.prompts[5]) && !isStrict(env.prompts[7]), "strict: changed files count as attempts and release it");
+    check(lastUser(env.asks[1]) === "and what about the score?", "a new question alone never fires the files-changed note");
+    const fps = env.log()[0].contextFingerprints;
+    check(fps.length === 2 && fps[0].hash === fps[1].hash && fps[1].changed === false, "files fingerprint unaffected by recent_questions");
   }
-  // unreadable log: strict still works from the session, and nothing is ever written
+  // fallback context also carries recent_questions
   {
-    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, existingLog: "{not json", inputs: ["next", "next", "next", "next", "next", "bye"] });
+    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, inputs: ["hi", "bye"] });
+    global.window.codioIDE.coachBot.getContext = async function() { throw new Error("no ctx"); };
+    global.window.codioIDE.files.getStructure = async function() { throw new Error("no tree"); };
+    global.window.codioIDE.files.getContentBase64 = async function() { throw new Error("no read"); };
     await env.run();
-    check(isStrict(env.prompts[4]), "strict: works when the log is unreadable");
-    check(env.logFiles[".coach-log.json"] === "{not json", "strict: unreadable log never written");
+    check(env.asks[0][0].content.indexOf("<recent_questions>") >= 0, "context with unreadable files still has recent_questions");
   }
+  // unreadable log: still works, never writes
+  {
+    const env = makeEnv({ files: { "project.sb3": fixtureBytes }, existingLog: "{not json", inputs: ["hello cat", "bye"] });
+    await env.run();
+    check(env.asks.length === 1 && env.asks[0][0].content.indexOf("<recent_questions>") >= 0, "unreadable log: recent_questions built from this session");
+    check(env.logFiles[".coach-log.json"] === "{not json", "unreadable log never written");
+  }
+  // the round-3 phrase list is gone
+  check(src.indexOf("isNextStepAsk") < 0 && src.indexOf("updateStrict") < 0 && src.indexOf("STRICT_PROMPT") < 0 && src.indexOf("strictBackstopSuffix") < 0 && src.indexOf("STRICT_BACKSTOP_PROMPT") < 0, "phrase-list and round-4 backstop code removed");
 
   // S2: both reads fail and getStructure returns an empty map -> never treated as "no log yet"
   {
