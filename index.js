@@ -1,6 +1,6 @@
 (async function(codioIDE, window) {
 
-  const VERSION = "1.5.0";
+  const VERSION = "1.6.0";
 
   const systemPrompt = `You are the Scratch Coach, a friendly coding helper for 6th grade students (about 11 years old) learning Scratch. Use short, simple words.
 
@@ -106,7 +106,11 @@ Students work in Codio, never some other editor or website. You can't run anythi
 
 ## When to send them to the teacher
 
-Suggest asking the teacher when something really needs a human: Codio itself seems broken (the button does nothing, files are missing, they can't Mark as Complete), questions about grades or deadlines, the student is upset or frustrated, or anything about their wellbeing or safety. Don't use "ask your teacher" to dodge a question about their blocks or about Codio that you can answer.`;
+Suggest asking the teacher when something really needs a human: Codio itself seems broken (the button does nothing, files are missing, they can't Mark as Complete), questions about grades or deadlines, the student is upset or frustrated, or anything about their wellbeing or safety. Don't use "ask your teacher" to dodge a question about their blocks or about Codio that you can answer.
+
+## Starter projects
+
+Some assignments begin with a starter project. When <starter_check> says a project is SAME AS THE STARTER, every block in it came with the assignment. Don't praise the student for those blocks or say they built them. If they ask "am I done?" or "is this right?", tell them kindly that the blocks are still the same as the starter, then point to the first thing the guide asks them to change. You can still explain how the starter's scripts work. Costumes, backdrops and sounds aren't part of this check, so only talk about blocks. When it says "changed from the starter", some blocks are theirs and some came with the starter; don't assume which. With no <starter_check>, say nothing about starters.`;
 
   const exitPhrases = ["thanks", "thank you", "bye", "done", "exit", "quit", "stop", "no thanks", "i'm good", "im good", "that's all", "thats all"];
 
@@ -712,6 +716,8 @@ Suggest asking the teacher when something really needs a human: Codio itself see
         if (!isGuess) notShown.push(baseNameOf(path)); // unreadable (guesses may simply not exist)
         continue;
       }
+      // Fingerprint the WHOLE rendered project, before the cut below.
+      const starterFp = text === "(empty file)" ? null : starterFingerprint(text);
       if (text.length > MAX_PROJECT_CHARS) {
         text = text.substring(0, MAX_PROJECT_CHARS) + "\n(cut off after " + MAX_PROJECT_CHARS + " characters)";
       }
@@ -722,7 +728,7 @@ Suggest asking the teacher when something really needs a human: Codio itself see
       }
       total += text.length;
       seenBase[base] = true;
-      sections.push({ path: String(path), body: "Project file: " + path + "\n" + text });
+      sections.push({ path: String(path), body: "Project file: " + path + "\n" + text, starterFp: starterFp });
     }
 
     if (sections.length === 0) {
@@ -737,7 +743,10 @@ Suggest asking the teacher when something really needs a human: Codio itself see
     if (notShown.length) {
       out += "\n\nNot shown (too long to include, or couldn't be read): " + notShown.join(", ");
     }
-    return { ok: true, text: out };
+    const projects = sections.filter(function(x) { return x.starterFp; }).map(function(x) {
+      return { name: baseNameOf(x.path), len: x.starterFp.len, hash: x.starterFp.hash };
+    });
+    return { ok: true, text: out, projects: projects };
   }
 
   // ============================================================
@@ -794,6 +803,66 @@ Suggest asking the teacher when something really needs a human: Codio itself see
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
     return { len: s.length, hash: ("0000000" + h.toString(16)).slice(-8) };
+  }
+
+  // ---- Starter detection (#169) ----
+  // A guide page may carry one HTML comment per starter project:
+  //   <!-- coach-starter: v1 sb3 <len>-<hash> <file name> -->
+  // <len>-<hash> is fingerprint() of the rendered project text after normalizeStarterText().
+  // Any change to renderProject() output changes every hash: bump STARTER_FP_VERSION then
+  // (the golden test in test/run-test.js fails first), and re-pin the guides.
+  const STARTER_FP_VERSION = 1;
+
+  function normalizeStarterText(text) {
+    return String(text || "")
+      .replace(/\r\n?/g, "\n")
+      .split("\n").map(function(l) { return l.replace(/[ \t]+$/, ""); }).join("\n")
+      .replace(/^\n+/, "").replace(/\n+$/, "");
+  }
+
+  function starterFingerprint(text) {
+    return fingerprint(normalizeStarterText(text));
+  }
+
+  // Returns every well-formed pin comment found in the guide text (any version, any kind).
+  function parseStarterPins(guideText) {
+    const re = /<!--\s*coach-starter:\s*v(\d+)\s+([a-z0-9]+)\s+(\d+)-([0-9a-f]{8})\s+(.+?)\s*-->/gi;
+    const out = [];
+    const s = String(guideText || "");
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      if (m[5].indexOf("--") >= 0) continue;
+      out.push({ version: parseInt(m[1], 10), kind: m[2].toLowerCase(), len: parseInt(m[3], 10), hash: m[4].toLowerCase(), name: m[5] });
+    }
+    return out;
+  }
+
+  // Removes pin comment lines so the model never sees them. Text without pins comes back unchanged.
+  function stripStarterPins(guideText) {
+    const s = String(guideText || "");
+    if (!/<!--\s*coach-starter:/i.test(s)) return s;
+    return s.replace(/^[ \t]*<!--\s*coach-starter:[^]*?-->[ \t]*(?:\r?\n|$)/gim, "").replace(/<!--\s*coach-starter:[^]*?-->/gi, "");
+  }
+
+  // projects: [{name, len, hash}] (as returned by getScratchProjectsText); pins from parseStarterPins.
+  // Returns { lines, status } or null when no shown project has a usable pin.
+  function starterCheck(projects, pins) {
+    const usable = (pins || []).filter(function(p) { return p.kind === "sb3" && p.version === STARTER_FP_VERSION; });
+    const lines = [];
+    let same = 0, changed = 0;
+    (projects || []).forEach(function(pr) {
+      const mine = usable.filter(function(p) { return p.name.toLowerCase() === String(pr.name).toLowerCase(); });
+      if (!mine.length) return;
+      if (mine.some(function(p) { return p.len === pr.len && p.hash === pr.hash; })) {
+        same++;
+        lines.push(pr.name + ": SAME AS THE STARTER. The student has not changed any blocks in this project yet.");
+      } else {
+        changed++;
+        lines.push(pr.name + ": changed from the starter.");
+      }
+    });
+    if (!lines.length) return null;
+    return { lines: lines, status: changed === 0 ? "same" : (same === 0 ? "changed" : "mixed") };
   }
 
   // Bound any files-API call so a hung deleteFiles/add/getContent can't stall the coach.
@@ -1086,6 +1155,7 @@ Try-first help means: stay warm and keep helping with every question, but nudge 
     // The text inside <project>...</project> from the most recent build, and its fingerprint
     // from the previous turn (to tell whether the student's files changed).
     let lastFilesBlock = "";
+    let lastStarter = null; // "same" | "changed" | "mixed" | null, logged per turn
     let lastAnsweredHash = null; // hash of the files block the last answered turn was based on
     let pendingHash = null;      // hash of this turn's files block (becomes lastAnsweredHash once answered)
 
@@ -1123,9 +1193,12 @@ Try-first help means: stay warm and keep helping with every question, but nudge 
       if (isRefresh && !res.ok) throw new Error("project could not be read");
       lastFilesBlock = res.text;
 
-      const guideContent = (ctx.guidesPage && typeof ctx.guidesPage.content === "string" && ctx.guidesPage.content.trim().length > 0)
-        ? ctx.guidesPage.content.trim()
-        : "No guide available.";
+      const rawGuide = (ctx.guidesPage && typeof ctx.guidesPage.content === "string") ? ctx.guidesPage.content : "";
+      const sc = starterCheck(res.projects, parseStarterPins(rawGuide));
+      lastStarter = sc ? sc.status : null;
+      const starterBlock = sc ? "<starter_check>\n" + sc.lines.join("\n") + "\n</starter_check>\n" : "";
+      const guideText = stripStarterPins(rawGuide);
+      const guideContent = guideText.trim().length > 0 ? guideText.trim() : "No guide available.";
       const assignmentName = (ctx.assignmentData && ctx.assignmentData.name) ? ctx.assignmentData.name : null;
 
       const ending = isRefresh
@@ -1136,7 +1209,7 @@ Try-first help means: stay warm and keep helping with every question, but nudge 
 <project>
 ${res.text}
 </project>
-Here is the assignment guide:
+${starterBlock}Here is the assignment guide:
 <guide>
 ${guideContent}
 </guide>
@@ -1152,12 +1225,12 @@ ${ending}`;
       let entry;
       if (refreshFailed) {
         pendingHash = null;
-        entry = { len: null, hash: null, changed: false, refreshFailed: true };
+        entry = { len: null, hash: null, changed: false, refreshFailed: true, starter: null };
       } else {
         const fp = fingerprint(lastFilesBlock);
         changed = lastAnsweredHash !== null && fp.hash !== lastAnsweredHash;
         pendingHash = fp.hash;
-        entry = { len: fp.len, hash: fp.hash, changed: changed };
+        entry = { len: fp.len, hash: fp.hash, changed: changed, starter: lastStarter };
       }
       if (session.contextFingerprints.length < MAX_LOGGED_QUESTIONS) session.contextFingerprints.push(entry);
       return changed;
@@ -1166,6 +1239,7 @@ ${ending}`;
     // Used when the context can't be built at all: no files, so the model says it can't see them.
     function fallbackContext(question) {
       lastFilesBlock = "(I couldn't read the student's files just now.)";
+      lastStarter = null;
       return "Here are the student's Scratch project(s):\n<project>\n" + lastFilesBlock + "\n</project>\n" + recentQuestionsBlock(sessionHistory, session) + "\n\nThe student says: " + question;
     }
 
@@ -1298,6 +1372,6 @@ ${ending}`;
   }
 
   // Exposed for the Node test harness in test/ — unused inside Codio.
-  window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject, collectProjectPaths, isExitMessage, readModeTag, orderProjectPaths, getScratchProjectsText, systemPrompt };
+  window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject, collectProjectPaths, isExitMessage, readModeTag, orderProjectPaths, getScratchProjectsText, systemPrompt, STARTER_FP_VERSION, normalizeStarterText, starterFingerprint, parseStarterPins, stripStarterPins };
 
 })(window.codioIDE, window);

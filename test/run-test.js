@@ -610,6 +610,149 @@ eval(src);
     check(fps.length === 2 && fps[1].refreshFailed === true, "refresh getContext failure: refreshFailed entry logged");
   }
 
+  // --- starter detection (#169) ---
+  {
+    const T = makeEnv({}).test;
+    const pin = function(name, fp, v, kind) { return "<!-- coach-starter: v" + (v || 1) + " " + (kind || "sb3") + " " + fp.len + "-" + fp.hash + " " + name + " -->"; };
+    const renderedOf = function(proj) { return T.renderProject(proj); };
+
+    // parser
+    {
+      const g = "Intro\n<!-- coach-starter: v1 sb3 1482-9f3a1c2e Quiz Show.sb3 -->\ntext\n<!-- coach-starter: v1 sb3 10-00000001 Maze.sb3 -->\n<!-- coach-starter: v1 sb3 11-00000002 Maze.sb3 -->";
+      const p = T.parseStarterPins(g);
+      check(p.length === 3, "parser: three pins found");
+      check(p[0].name === "Quiz Show.sb3" && p[0].len === 1482 && p[0].hash === "9f3a1c2e" && p[0].version === 1 && p[0].kind === "sb3", "parser: spaces in names, fields");
+      check(p[1].name === "Maze.sb3" && p[2].name === "Maze.sb3" && p[2].len === 11, "parser: two pins for one name");
+      const v2 = T.parseStarterPins("<!-- coach-starter: v2 sb3 10-00000001 A.sb3 -->");
+      check(v2.length === 1 && v2[0].version === 2, "parser: other version is parsed (ignored later by starterCheck)");
+      check(T.parseStarterPins("<!-- coach-starter: v1 py 10-00000001 A.py -->")[0].kind === "py", "parser: other kind parsed");
+      ["<!-- coach-starter: v1 sb3 10-0000001 A.sb3 -->", "<!-- coach-starter: v1 sb3 x-00000001 A.sb3 -->", "<!-- coach-starter: v1 sb3 10-00000001 -->", "<!-- coach-starter: v1 sb3 10-00000001 A--B.sb3 -->", "<!-- coach-starter: sb3 10-00000001 A.sb3 -->", "<!-- coach-starter: v1 sb3 10-00000001 A.sb3", ""].forEach(function(m) {
+        check(T.parseStarterPins(m).length === 0, "parser: malformed ignored: " + m);
+      });
+      check(T.stripStarterPins("a\n<!-- coach-starter: v1 sb3 10-00000001 A.sb3 -->\nb") === "a\nb", "strip: pin line removed");
+      check(T.stripStarterPins("a\n\nb  ") === "a\n\nb  ", "strip: text without pins unchanged");
+    }
+
+    // normalization and golden fingerprint
+    {
+      check(T.normalizeStarterText("\r\n\r\nab  \t\r\ncd\r\n\r\n") === "ab\ncd", "normalize: CRLF, trailing blanks, outer blank lines");
+      const gold = T.starterFingerprint(rendered);
+      check(gold.len === 655 && gold.hash === "d04fe9d8", "golden fingerprint of test/test.sb3 is 655-d04fe9d8 (renderer changed? bump STARTER_FP_VERSION and re-pin guides). Got " + gold.len + "-" + gold.hash);
+    }
+
+    const base = tinyProject("Cat", 2);
+    base.targets[1].blocks.b0.x = 10; base.targets[1].blocks.b0.y = 20;
+    const baseFp = T.starterFingerprint(renderedOf(base));
+    const PIN = pin("Quiz Show.sb3", baseFp);
+    const guideWith = "Step one.\n" + PIN + "\nStep two.";
+    const proj = { "Quiz Show.sb3": makeSb3(base) };
+
+    // unchanged project
+    {
+      const env = makeEnv({ files: proj, guide: guideWith, inputs: ["am I done?", "bye"] });
+      await env.run();
+      const m0 = env.asks[0][0].content;
+      check(m0.indexOf("<starter_check>\nQuiz Show.sb3: SAME AS THE STARTER. The student has not changed any blocks in this project yet.\n</starter_check>\nHere is the assignment guide:") > 0, "unchanged: SAME line sits right after </project>");
+      check(m0.indexOf("coach-starter") < 0, "unchanged: pin comment not in <guide>");
+      check(m0.indexOf("<guide>\nStep one.\nStep two.\n</guide>") > 0, "unchanged: guide text otherwise intact");
+      check(m0.indexOf("</project>\n<starter_check>") > 0 && m0.indexOf("<starter_check>") > m0.indexOf("</project>"), "unchanged: block is outside <project>");
+      check(env.log()[0].contextFingerprints[0].starter === "same", "unchanged: log says same");
+    }
+    // moved block position and sprite x/y: still same
+    {
+      const moved = JSON.parse(JSON.stringify(base));
+      moved.targets[1].blocks.b0.x = 999; moved.targets[1].blocks.b0.y = -5; moved.targets[1].x = 77; moved.targets[1].y = 88;
+      const env = makeEnv({ files: { "Quiz Show.sb3": makeSb3(moved) }, guide: guideWith, inputs: ["hi", "bye"] });
+      await env.run();
+      check(env.asks[0][0].content.indexOf("SAME AS THE STARTER") > 0, "moving a block or sprite does not count as a change");
+    }
+    // one changed block
+    {
+      const ch = JSON.parse(JSON.stringify(base));
+      ch.targets[1].blocks.m0.inputs.STEPS = [1, [4, "11"]];
+      const env = makeEnv({ files: { "Quiz Show.sb3": makeSb3(ch) }, guide: guideWith, inputs: ["hi", "bye"] });
+      await env.run();
+      const m0 = env.asks[0][0].content;
+      check(m0.indexOf("Quiz Show.sb3: changed from the starter.") > 0 && m0.indexOf("SAME AS") < 0, "one changed block gives 'changed from the starter'");
+      check(env.log()[0].contextFingerprints[0].starter === "changed", "changed: log says changed");
+    }
+    // case-insensitive name, mixed status, second pinned file, unpinned file
+    {
+      const ch = JSON.parse(JSON.stringify(base)); ch.targets[1].blocks.m1.inputs.STEPS = [1, [4, "99"]];
+      const g = pin("quiz show.SB3", baseFp) + "\n" + pin("Maze.sb3", baseFp) + "\n" + pin("Other.sb3", baseFp);
+      const env = makeEnv({ files: { "Quiz Show.sb3": makeSb3(base), "Maze.sb3": makeSb3(ch), "extra.sb3": makeSb3(ch) }, guide: g, inputs: ["hi", "bye"] });
+      await env.run();
+      const m0 = env.asks[0][0].content;
+      check(m0.indexOf("Quiz Show.sb3: SAME") > 0 && m0.indexOf("Maze.sb3: changed from the starter.") > 0, "case-insensitive match; two pinned projects");
+      check(m0.indexOf("extra.sb3:") < 0 && m0.indexOf("Other.sb3:") < 0, "unpinned project and pin for a missing file get no line");
+      check(env.log()[0].contextFingerprints[0].starter === "mixed", "mixed status logged");
+    }
+    // two pins for one name: matches either
+    {
+      const g = pin("Quiz Show.sb3", { len: 5, hash: "deadbeef" }) + "\n" + PIN;
+      const env = makeEnv({ files: proj, guide: g, inputs: ["hi", "bye"] });
+      await env.run();
+      check(env.asks[0][0].content.indexOf("SAME AS THE STARTER") > 0, "two pins for one file: matches either");
+    }
+    // wrong version / unknown kind: no block, but comment still stripped
+    {
+      const g = "A\n" + pin("Quiz Show.sb3", baseFp, 2) + "\n" + pin("Quiz Show.sb3", baseFp, 1, "py") + "\nB";
+      const env = makeEnv({ files: proj, guide: g, inputs: ["hi", "bye"] });
+      await env.run();
+      const m0 = env.asks[0][0].content;
+      check(m0.indexOf("<starter_check>") < 0, "wrong version and unknown kind are ignored");
+      check(m0.indexOf("coach-starter") < 0 && env.log()[0].contextFingerprints[0].starter === null, "ignored pins: stripped, starter null");
+    }
+    // no pins: byte-identical to today's template
+    {
+      const env = makeEnv({ files: proj, guide: "Make the cat move.", inputs: ["why?", "bye"] });
+      await env.run();
+      const m0 = env.asks[0][0].content;
+      const res = await env.test.getScratchProjectsText("why?", []);
+      const expected = "Here are the student's Scratch project(s), unpacked into text form:\n<project>\n" + res.text + "\n</project>\nHere is the assignment guide:\n<guide>\nMake the cat move.\n</guide>\n";
+      check(m0.indexOf(expected) === 0, "no pins: context message prefix is byte-identical to the pre-1.6.0 template");
+      check(m0.indexOf("starter") < 0, "no pins: no mention of starter anywhere");
+      check(m0.endsWith("\n\nAssignment: Test Lesson\n\n\nThe student says: why?") || /\n\nAssignment: Test Lesson\n\nThe student says: why\?$/.test(m0) || m0.indexOf("The student says: why?") > 0, "no pins: ending unchanged");
+      check(env.log()[0].contextFingerprints[0].starter === null, "no pins: starter null in log");
+    }
+    // over-30k project is hashed whole
+    {
+      const big = tinyProject("Big", 1200);
+      const bigFp = T.starterFingerprint(renderedOf(big));
+      check(bigFp.len > 30000, "fixture: big project renders over 30000 chars (" + bigFp.len + ")");
+      const env = makeEnv({ files: { "Big.sb3": makeSb3(big) }, guide: pin("Big.sb3", bigFp), inputs: ["hi", "bye"] });
+      await env.run();
+      const m0 = env.asks[0][0].content;
+      check(m0.indexOf("(cut off after 30000 characters)") > 0 && m0.indexOf("Big.sb3: SAME AS THE STARTER") > 0, "over 30000 chars: cut for the model, hashed whole");
+      const res = await env.test.getScratchProjectsText("", []);
+      check(res.projects.length === 1 && res.projects[0].len === bigFp.len && res.projects[0].hash === bigFp.hash, "getScratchProjectsText returns whole-project len/hash");
+    }
+    // empty file gets no fingerprint
+    {
+      const env = makeEnv({ files: { "Empty.sb3": Buffer.alloc(0), "project.sb3": makeSb3(base) }, guide: "x", inputs: ["hi", "bye"] });
+      const res = await env.test.getScratchProjectsText("", []);
+      check(res.projects.length === 1 && res.projects[0].name === "project.sb3", "empty project has no starter fingerprint");
+    }
+    // prompt section
+    {
+      const sp = T.systemPrompt;
+      check(sp.indexOf("## Starter projects") >= 0 && sp.indexOf("<starter_check>") >= 0 && sp.indexOf("—") < 0, "prompt has the Starter projects section, no em-dash");
+    }
+    // CLI round trip
+    {
+      const cp = require("child_process");
+      const cli = path.join(__dirname, "..", "tools", "starter-fingerprint.js");
+      const line = cp.execFileSync("node", [cli, sb3Path], { encoding: "utf8" }).trim();
+      const pp = T.parseStarterPins(line);
+      check(pp.length === 1 && pp[0].name === "test.sb3" && pp[0].len === 655 && pp[0].hash === "d04fe9d8", "CLI line parses back to the golden values");
+      const js = JSON.parse(cp.execFileSync("node", [cli, "--json", sb3Path], { encoding: "utf8" }));
+      check(js.length === 1 && js[0].comment === line && js[0].len === 655 && js[0].hash === "d04fe9d8" && js[0].version === 1 && js[0].name === "test.sb3", "CLI --json shape");
+      let code = 0;
+      try { cp.execFileSync("node", [cli, path.join(__dirname, "nope.sb3")], { stdio: "pipe" }); } catch (e) { code = e.status; }
+      check(code === 1, "CLI exits 1 for an unreadable file");
+    }
+  }
+
   // --- prompt content checks ---
   {
     const sp = makeEnv({}).test.systemPrompt;
