@@ -23,10 +23,10 @@ How you see the student's project:
 ## You always see their latest work
 
 Before every reply you get a fresh copy of the student's projects in <project>. Your earlier replies in this chat were written about an older version. When their projects changed, their message starts with "(Note: the student's files have changed since your last reply.)"
-- If a problem you pointed out earlier is gone, the student fixed it. Say so ("You moved the wait block inside the loop, nice!"). Do NOT apologize or say you misread. You didn't.
+- If a problem you pointed out earlier is gone, the student fixed it. Say so in a few words the first time ("You moved the wait block inside the loop, nice!"), not as the opener of every reply. Do NOT apologize or say you misread. You didn't.
 - Only correct yourself if your earlier advice was wrong for the blocks it was about. Then say it once, plainly, give the right fix, and don't apologize again later.
 - Never ask the student to paste their blocks or send a screenshot. You can already see them.
-- If their message and <project> disagree (they say they changed something you can't see), the project you see may be a little behind. Say what you see and ask them to save the project and ask again. Never insist their working project is broken.
+- If their message and <project> disagree (they say they changed something you can't see), the project you see may be a little behind. Say what you see and ask them to save the project and ask again. Only bring up saving in that case. Don't end replies with "save and run". Never insist their working project is broken.
 
 Scratch basics to remember:
 - Every script starts with a hat block (when green flag clicked, when key pressed, when I receive...). Blocks not connected to a hat block never run.
@@ -945,12 +945,19 @@ Some assignments begin with a starter project. When <starter_check> says a proje
   const TRY_FIRST_WINDOW = 5;
   const RECENT_QUESTIONS_SHOWN = 10;   // questions listed in <recent_questions>
   const RECENT_QUESTION_CHARS = 160;   // each one cut to this length
+  const HANDOFF_AFTER_TRY_FIRST = 10;  // try-first replies in one session before the one-time teacher handoff
+  const HANDOFF_REPEAT_AFTER = 3;      // same, when an earlier session in this box (last STRICT_WORKSPACE_DAYS days) got a handoff
+  const CHECKS_IN_A_ROW = 3;           // edit-then-ask turns in a row before "run it and test every case yourself"
+  const HANDOFF_MESSAGE = "This coach is meant for quick questions and help with bugs. Your questions now are a better fit for your teacher, so please reach out to them for help. I can still help you find typos or understand the directions.";
   const MODE_LABELS = ["ask", "attempt", "other"];
 
   // This coach's recent questions in this box (last STRICT_WORKSPACE_DAYS days, this
   // session included), each with the label the model gave it (null if none yet).
+  // priorHandoff: an earlier session here already gave a handoff. hasCurrent: the
+  // current question is the last item (false once the logged-question cap stops it).
   function recentQuestionList(history, session) {
     let total = 0;
+    let priorHandoff = false;
     let items = [];
     const list = Array.isArray(history) ? history : [];
     for (let i = 0; i < list.length; i++) {
@@ -958,6 +965,7 @@ Some assignments begin with a starter project. When <starter_check> says a proje
       if (!s || typeof s !== "object" || s.coach !== COACH_ID) continue;
       const startedMs = Date.parse(s.started);
       if (s !== session && !(startedMs > Date.now() - STRICT_WORKSPACE_DAYS * 86400000)) continue;
+      if (s !== session && s.handoff === true) priorHandoff = true;
       const qs = Array.isArray(s.questions) ? s.questions : [];
       const labels = Array.isArray(s.labels) ? s.labels : [];
       total += (typeof s.exchanges === "number" && s.exchanges >= qs.length) ? s.exchanges : qs.length;
@@ -965,29 +973,56 @@ Some assignments begin with a starter project. When <starter_check> says a proje
         if (typeof qs[j] === "string") items.push({ q: qs[j], label: MODE_LABELS.indexOf(labels[j]) !== -1 ? labels[j] : null });
       }
     }
-    return { total: total, items: items };
+    const hasCurrent = Array.isArray(session.questions) && session.questions.length === (session.exchanges || 0);
+    return { total: total, items: items, priorHandoff: priorHandoff, hasCurrent: hasCurrent };
   }
 
-  // Which help each possible label of the CURRENT question gets this turn.
+  // Which help each possible label of the CURRENT question gets this turn: normal,
+  // try-first, handoff (the one turn that carries the teacher note) or after-handoff.
   function modeRule(history, session) {
     const recent = recentQuestionList(history, session);
-    let prior = recent.items.slice(0, -1).slice(-(TRY_FIRST_WINDOW - 1));
+    // consecutive recent asks that came right after an edit (counted from the log)
+    let checkStreak = 0;
+    const labels = Array.isArray(session.labels) ? session.labels : [];
+    const fps = Array.isArray(session.contextFingerprints) ? session.contextFingerprints : [];
+    for (let i = labels.length - 1; i >= 0; i--) {
+      if (labels[i] === "ask" && fps[i] && fps[i].changed === true) checkStreak++;
+      else break;
+    }
+    if (session.handoff === true) {
+      return { ask: "after-handoff", attempt: "after-handoff", other: "after-handoff", backstop: false, handoffReason: null, checkStreak: checkStreak, recent: recent };
+    }
+    let prior = (recent.hasCurrent ? recent.items.slice(0, -1) : recent.items).slice(-(TRY_FIRST_WINDOW - 1));
     let lastAttempt = -1;
     prior.forEach(function(it, i) { if (it.label === "attempt") lastAttempt = i; });
     prior = prior.slice(lastAttempt + 1); // an attempt starts the count over
     const priorAsks = prior.filter(function(it) { return it.label === "ask"; }).length;
     const modes = Array.isArray(session.modes) ? session.modes : [];
     const lastMode = modes.length ? modes[modes.length - 1] : "normal";
+    let rule;
     if ((session.exchanges || 0) >= STRICT_SESSION_QUESTIONS) {
-      return { ask: "try-first", attempt: "try-first", other: "try-first", backstop: true, recent: recent };
+      rule = { ask: "try-first", attempt: "try-first", other: "try-first", backstop: true };
+    } else {
+      rule = {
+        ask: (priorAsks + 1 >= TRY_FIRST_ASKS || lastMode === "try-first") ? "try-first" : "normal",
+        attempt: "normal",
+        other: lastMode === "try-first" ? "try-first" : "normal",
+        backstop: false
+      };
     }
-    return {
-      ask: (priorAsks + 1 >= TRY_FIRST_ASKS || lastMode === "try-first") ? "try-first" : "normal",
-      attempt: "normal",
-      other: lastMode === "try-first" ? "try-first" : "normal",
-      backstop: false,
-      recent: recent
-    };
+    rule.handoffReason = null;
+    // Enough try-first replies already: the next try-first turn carries the handoff.
+    const tryFirstSoFar = modes.filter(function(m) { return m === "try-first"; }).length;
+    const limit = recent.priorHandoff ? HANDOFF_REPEAT_AFTER : HANDOFF_AFTER_TRY_FIRST;
+    if (tryFirstSoFar >= limit) {
+      ["ask", "attempt", "other"].forEach(function(l) { if (rule[l] === "try-first") rule[l] = "handoff"; });
+      if (rule.ask === "handoff" || rule.attempt === "handoff" || rule.other === "handoff") {
+        rule.handoffReason = recent.priorHandoff ? "repeat" : "session";
+      }
+    }
+    rule.checkStreak = checkStreak;
+    rule.recent = recent;
+    return rule;
   }
 
   // The <recent_questions> block for messages[0]. Rebuilt every turn after recordTurn().
@@ -996,10 +1031,15 @@ Some assignments begin with a starter project. When <starter_check> says a proje
     const shown = rule.recent.items.slice(-RECENT_QUESTIONS_SHOWN).map(function(it, i, arr) {
       const one = it.q.replace(/\s+/g, " ").trim();
       const cut = one.length > RECENT_QUESTION_CHARS ? one.slice(0, RECENT_QUESTION_CHARS) + "..." : one;
-      const tag = (i === arr.length - 1) ? "[current]" : "[" + (it.label || "?") + "]";
+      const tag = (rule.recent.hasCurrent && i === arr.length - 1) ? "[current]" : "[" + (it.label || "?") + "]";
       return (i + 1) + ". " + tag + " " + cut;
     });
-    const big = function(m) { return m === "try-first" ? "TRY-FIRST help" : "NORMAL help"; };
+    const big = function(m) {
+      if (m === "try-first") return "TRY-FIRST help";
+      if (m === "after-handoff") return "AFTER-HANDOFF help";
+      if (m === "handoff") return "HANDOFF turn: reply in at most two sentences. You may say what an error message means or how to run their work, or respond to what they said. Do not check their change, do not say what to change next, and do not mention their teacher. A note about meeting their teacher is added after your reply.";
+      return "NORMAL help";
+    };
     return "<recent_questions>\n" +
       "Questions to you in this assignment in the last " + STRICT_WORKSPACE_DAYS + " days: " + rule.recent.total +
       ". In this session: " + (session.exchanges || 0) + ".\n" +
@@ -1008,7 +1048,21 @@ Some assignments begin with a starter project. When <starter_check> says a proje
       "- [[ask]]: " + big(rule.ask) + "\n" +
       "- [[attempt]]: " + big(rule.attempt) + "\n" +
       "- [[other]]: " + big(rule.other) + "\n" +
+      (session.handoff === true ? "You already told this student to go over this assignment with their teacher. Do not repeat that note.\n" : "") +
+      (rule.checkStreak >= CHECKS_IN_A_ROW ? "They have asked you to check an edit " + rule.checkStreak + " times in a row. If this message is another check, do not check it. Ask them to run it, try every case, and tell you what happened.\n" : "") +
       "</recent_questions>";
+  }
+
+  // Swap the <recent_questions> block inside an older context message for a fresh one.
+  // Used when a context refresh fails, so the model still gets this turn's help level.
+  function refreshRecentBlock(content, history, session) {
+    const text = String(content || "");
+    const start = text.indexOf("<recent_questions>\n");
+    if (start === -1) return text;
+    const endTag = "\n</recent_questions>";
+    const end = text.indexOf(endTag, start);
+    if (end === -1) return text;
+    return text.slice(0, start) + recentQuestionsBlock(history, session) + text.slice(end + endTag.length);
   }
 
   // Reads and strips the hidden tag line. Returns the label (null if missing) and the
@@ -1034,9 +1088,10 @@ Some assignments begin with a starter project. When <starter_check> says a proje
   }
 
   // The chat-history copy of a reply keeps its tag line (only the student's view is
-  // cleaned), so the model keeps seeing itself tag every reply.
-  function historyReply(tagged) {
-    return "[[" + (tagged.label || "other") + "]]\n" + tagged.text;
+  // cleaned), so the model keeps seeing itself tag every reply. `shown` is the text the
+  // student saw, when that differs from the model's own text (the handoff note).
+  function historyReply(tagged, shown) {
+    return "[[" + (tagged.label || "other") + "]]\n" + (shown === undefined ? tagged.text : shown);
   }
 
   // Call after every non-empty reply, with the rule used for this turn (from
@@ -1051,7 +1106,12 @@ Some assignments begin with a starter project. When <starter_check> says a proje
     while (session.modes.length < session.labels.length) session.modes.push(null);
     if (session.labels.length < MAX_LOGGED_QUESTIONS) session.labels.push(label);
     if (session.modes.length < MAX_LOGGED_QUESTIONS) session.modes.push(mode);
-    if (mode === "try-first") {
+    if (mode === "handoff") {
+      session.handoff = true;
+      session.handoffAt = (session.exchanges || 1) - 1;
+      session.handoffReason = rule.handoffReason || null;
+    }
+    if (mode === "try-first" || mode === "handoff" || mode === "after-handoff") {
       session.strictReleased = false;
       if (!session.strict) {
         session.strict = true;
@@ -1063,23 +1123,34 @@ Some assignments begin with a starter project. When <starter_check> says a proje
     return mode;
   }
 
+  // One call per non-empty reply: records the mode, and on the handoff turn appends the
+  // fixed teacher note to what the student sees (and to the history copy).
+  function finishReply(session, rule, tagged) {
+    const mode = recordMode(session, rule, tagged.label);
+    const shown = tagged.text + (mode === "handoff" ? "\n\n" + HANDOFF_MESSAGE : "");
+    return { mode: mode, shown: shown, history: historyReply(tagged, shown) };
+  }
+
   const TRY_FIRST_PROMPT = `
 
 ## Try-first help: label each message
 
 Each message includes <recent_questions>: the student's recent questions to you in this assignment and the label you gave each one. Start EVERY reply with one hidden tag line that labels the student's CURRENT message, then your reply on the next line:
-- [[ask]]: they want you to give them the next step, the code, or a check instead of trying something themselves. Judge the meaning in any wording: "now what", "how do I do that", "what goes next", "can you tell me how to...", "is this right?", "like that?", "show me", "say the instructions easier", "what are all the steps", a bare paste with no question.
-- [[attempt]]: THIS message shows or describes something new they tried since your last reply (what they changed, what happened when they ran it, or their own plan), or it starts with the note that their files changed. Code that was already in their files does not make a message an attempt.
+- [[ask]]: they want you to give them the next step, the code, or a check instead of trying something themselves. Judge the meaning in any wording: "now what", "how do I do that", "what goes next", "can you tell me how to...", "is this right?", "like that?", "show me", "say the instructions easier", "what are all the steps", a bare paste with no question. A check-in right after an edit is an ask too: "now?", "like this?", "is that right?", "what next?", even when the message starts with the note that their files changed.
+- [[attempt]]: THIS message says in their own words something new they tried or think: what they changed, what happened when they ran it, what they think is wrong, or their plan. The note that their files changed is not enough on its own. Code that was already in their files does not make a message an attempt.
 - [[other]]: anything else, including pasting a real error message, asking what something means or how something works, asking how to run their code, asking where to find a block, menu or button, or answering a question you asked.
-Label the student's words, not their files. Examples: "how do I do that" [[ask]]; "like that?" [[ask]]; "show me" [[ask]]; "and then" [[ask]]; "NameError: name 'x' is not defined" [[other]]; "what does int() do?" [[other]]; "I added an if but it prints both times" [[attempt]]; "I think I should use a loop that adds 1 each time" [[attempt]].
+Label the student's words, not their files. Examples: "how do I do that" [[ask]]; "like that?" [[ask]]; "show me" [[ask]]; "and then" [[ask]]; "(files changed) now?" [[ask]]; "NameError: name 'x' is not defined" [[other]]; "what does int() do?" [[other]]; "I added an if but it prints both times" [[attempt]]; "I think I should use a loop that adds 1 each time" [[attempt]]; "I moved the score line above the loop and now it only counts once" [[attempt]].
 Then give the kind of help <recent_questions> lists for that label. The student never sees the tag. Never mention it, the labels, the mode, or their question count.
 
 Try-first help means: stay warm and keep helping with every question, but nudge them to try first.
-- Same as always: explain what an error message means and which line it points to, explain an idea, give a short example with different names or data, point out a typo or missing punctuation, help them find a block, menu or button, and tell them how to run their work.
+- Same as always: explain what an error message means and which line it points to, explain an idea, give a short example with different names or data, say which line or part has a typo or something missing, help them find a block, menu or button, and tell them how to run their work.
 - For "what do I write", "next" or "show me" questions, first ask one short question back ("What do you think the next step is?" or "What did you try?") and wait for their answer. If they answer with a real attempt, even a wrong one, help as usual from there.
-- Don't write the lesson's main step in their own work (their condition, their loop, their counter, their blocks). Show the pattern with different names and let them adapt it. If they ask twice for that step, give a parallel example, not their finished line. Fixing a typo or missing punctuation in a line they already wrote is still fine.
-- After about three "next step" asks in a row, suggest they run what they have and see what happens, or ask them to explain their plan in one sentence.
+- Don't write the lesson's main step in their own work (their condition, their loop, their counter, their blocks). Show the pattern with different names and let them adapt it. If they ask twice for that step, give a parallel example, not their finished line.
+- Say where, not what. When you see the problem, point to the line, block or part and name the kind of problem ("something is missing at the end of line 4", "look at which name that check uses"). Then ask what they think is wrong, or what they expect that part to do. Don't write the corrected line or name the exact edit until they've made a guess. If the guess is wrong, say what's off and give one more hint. After two wrong guesses about the same spot, tell them the fix in words.
+- When <recent_questions> says they've asked you to check several edits in a row, don't check this one. Ask them to run it, try every case it should handle, and tell you what happened each time. Then help with what they report.
 - If they've been stuck on the same thing for three or more turns, kindly suggest their teacher, for example: "This one might be easier to sort out with your teacher. If you're in class, ask them now. If you're working at home, send them a message about where you're stuck." That's a suggestion, never a refusal. Keep helping too.
+- HANDOFF turn: follow the instruction in <recent_questions> exactly.
+- After-handoff help: they've been told to go over this with their teacher. Still help them find typos (say where, as in the where-not-what rule), explain what the directions or an error message mean, and explain how to run their work, in one or two sentences each. Don't check their edits or say what to change next. Add one short line that their teacher is the best next step. Don't repeat the full note. Stay warm.
 - Never mention a mode, a limit or how many questions they've asked, and never refuse. You're a coach who wants them to try first.`;
 
   const fullSystemPrompt = systemPrompt + TRY_FIRST_PROMPT;
@@ -1138,7 +1209,10 @@ Try-first help means: stay warm and keep helping with every question, but nudge 
       strictReason: null,
       strictReleased: false,
       modes: [],
-      labels: []
+      labels: [],
+      handoff: false,
+      handoffAt: null,
+      handoffReason: null
     };
     const promptFor = function() { return fullSystemPrompt; };
     sessionHistory.push(session);
@@ -1255,10 +1329,11 @@ ${ending}`;
         codioIDE.coachBot.write("Hmm, I didn't get an answer that time. Please ask again!");
         messages.pop(); // drop the user turn that got no answer
       } else {
-        recordMode(session, rule, tagged.label);
+        const done = finishReply(session, rule, tagged);
         // ask() ran with stream:false, so we show the reply ourselves, without the hidden tag.
-        codioIDE.coachBot.write(tagged.text, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
-        messages.push({ role: "assistant", content: historyReply(tagged) }); // tag kept in history so the model keeps tagging
+        codioIDE.coachBot.write(done.shown, codioIDE.coachBot.MESSAGE_ROLES.ASSISTANT);
+        messages.push({ role: "assistant", content: done.history }); // tag kept in history so the model keeps tagging
+        if (logEnabled) queueSave(sessionHistory); // never awaited: keeps the last label, mode and handoff
         if (pendingHash !== null) lastAnsweredHash = pendingHash; // advance only after a real answer
       }
     }
@@ -1337,7 +1412,14 @@ ${ending}`;
             const fresh = await buildContextMessage(initialInput, true, input);
             messages[0] = { role: "user", content: fresh };
             changed = noteContextFingerprint();
-          } catch (e) { changed = false; noteContextFingerprint(true); }
+          } catch (e) {
+            changed = false;
+            noteContextFingerprint(true);
+            // The kept message still holds LAST turn's <recent_questions>: bring it up to date
+            try {
+              messages[0] = { role: "user", content: refreshRecentBlock(messages[0].content, sessionHistory, session) };
+            } catch (e2) {}
+          }
           messages.push({
             role: "user",
             content: changed ? "(Note: the student's files have changed since your last reply.)\n\n" + input : input
@@ -1373,5 +1455,6 @@ ${ending}`;
 
   // Exposed for the Node test harness in test/ — unused inside Codio.
   window.__scratchCoachTest = { toBytes, extractProjectJson, renderProject, collectProjectPaths, isExitMessage, readModeTag, orderProjectPaths, getScratchProjectsText, systemPrompt, STARTER_FP_VERSION, normalizeStarterText, starterFingerprint, parseStarterPins, stripStarterPins };
+  window.__coachTest = { modeRule, recentQuestionsBlock, readModeTag, historyReply, finishReply, refreshRecentBlock, HANDOFF_MESSAGE, HANDOFF_AFTER_TRY_FIRST, HANDOFF_REPEAT_AFTER, CHECKS_IN_A_ROW };
 
 })(window.codioIDE, window);
