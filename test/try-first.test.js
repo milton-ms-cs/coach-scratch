@@ -11,6 +11,17 @@ const src = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
 const COACH_ID = (src.match(/const COACH_ID = "([^"]+)"/) || [])[1];
 const LOG = ".coach-log.json";
 
+// Fixed clock: local noon on 2026-11-14, so no test depends on wall-clock time or the time zone.
+// Prior sessions are built from local-time constructors, and the coach compares local dates.
+const RealDate = Date;
+const NOW_MS = new RealDate(2026, 10, 14, 12, 0, 0).getTime();
+class FakeDate extends RealDate {
+  constructor(...a) { if (a.length === 0) super(NOW_MS); else super(...a); }
+  static now() { return NOW_MS; }
+}
+global.Date = FakeDate;
+const localAt = (dayOffset, h, m) => new RealDate(2026, 10, 14 + dayOffset, h, m || 0, 0).toISOString();
+
 let failures = 0;
 function check(label, cond) {
   if (cond) console.log("  ok  " + label);
@@ -146,7 +157,7 @@ function block(cap, i) {
 }
 function turnsOf(n, f) { const a = []; for (let i = 0; i < n; i++) a.push(Object.assign({ q: "question " + (i + 1) }, f(i))); return a; }
 const handoffWrites = (cap, T) => cap.writes.filter(w => w.text.indexOf(T.HANDOFF_MESSAGE) !== -1);
-const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
+const daysAgo = d => new RealDate(NOW_MS - d * 86400000).toISOString();
 
 (async () => {
   console.log("try-first tests for coach id: " + COACH_ID);
@@ -161,19 +172,24 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
 
   // all "other" labels: normal help until the backstop at question 10, then try-first
   const longTurns = n => turnsOf(n, () => ({ label: "other" }));
+  // all "ask": try-first from question 3, and every try-first turn counts toward the handoff
+  const askTurns = n => turnsOf(n, () => ({ label: "ask" }));
+  const NH = 2 + N; // 0-based turn index of the handoff when every turn is an ask
 
   // ---------------------------------------------------------------- 1
-  section(1, "N try-first replies, then the handoff");
-  const h1 = boot(longTurns(STRICT_AT + N + 2));
+  section(1, "N counted try-first asks, then the handoff");
+  const h1 = boot(askTurns(NH + 3));
   const c1 = await h1.run();
-  const hq = STRICT_AT + N - 1; // 0-based turn index of question 10+N
+  const hq = NH; // 0-based turn index of the handoff
   const w1 = replyWrite(c1, hq);
-  check("write for question " + (STRICT_AT + N) + " ends with HANDOFF_MESSAGE", w1 !== null && w1.endsWith(HM));
+  check("write for question " + (hq + 1) + " ends with HANDOFF_MESSAGE", w1 !== null && w1.endsWith(HM));
   check("it starts with the model's own text", w1.startsWith("Reply " + (hq + 1) + "."));
   const e1 = lastEntry(c1);
   check("modes has exactly one handoff, at that turn", e1.modes.filter(m => m === "handoff").length === 1 && e1.modes[hq] === "handoff");
   check("the " + N + " turns before it were try-first", e1.modes.slice(hq - N, hq).every(m => m === "try-first"));
   check("log has handoff true, handoffAt and reason session", e1.handoff === true && e1.handoffAt === hq && e1.handoffReason === "session");
+  check("handoffTime is logged as the turn's timestamp", e1.handoffTime === new RealDate(NOW_MS).toISOString());
+  check("labels and modes are index-aligned with the questions", e1.labels.length === e1.modes.length && e1.labels.length === e1.questions.length);
   check("strict stays true and is never released", e1.strict === true && e1.strictReleased === false);
   check("ask() options are exactly { stream: false, preventMenu: true }", c1.askOpts.every(o => o === JSON.stringify({ stream: false, preventMenu: true })));
 
@@ -186,7 +202,7 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
 
   // ---------------------------------------------------------------- 3
   section(3, "survives trimming");
-  const h3 = boot(longTurns(STRICT_AT + N + 14));
+  const h3 = boot(askTurns(NH + 16));
   const c3 = await h3.run();
   const lastAsk = c3.asks.length - 1;
   const msgs3 = c3.asks[lastAsk].messages;
@@ -196,9 +212,10 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
   check("every later mode is after-handoff", lastEntry(c3).modes.slice(hq + 1).every(m => m === "after-handoff"));
 
   // ---------------------------------------------------------------- 4
-  section(4, "handoff-turn block lists the HANDOFF instruction");
+  section(4, "handoff-turn block lists the HANDOFF instruction for ask only");
   const b4 = block(c1, hq);
-  check("all three labels get the HANDOFF turn instruction", (b4.match(/- \[\[(ask|attempt|other)\]\]: HANDOFF turn:/g) || []).length === 3);
+  check("only the ask label gets the HANDOFF turn instruction", /- \[\[ask\]\]: HANDOFF turn:/.test(b4) && (b4.match(/HANDOFF turn:/g) || []).length === 1);
+  check("other and attempt do not (the backstop is on here, so they stay try-first)", /- \[\[other\]\]: TRY-FIRST help/.test(b4) && /- \[\[attempt\]\]: TRY-FIRST help/.test(b4));
   check("it tells the model not to mention the teacher and not to check", /do not mention their teacher/.test(b4) && /Do not check their change/.test(b4));
 
   // ---------------------------------------------------------------- 5
@@ -206,12 +223,12 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
   // With N this high the backstop is already on by the time N try-first replies exist, so
   // exercise modeRule directly with a synthetic session that has N try-first replies.
   const syn5 = { coach: COACH_ID, started: new Date().toISOString(), exchanges: 5,
-    questions: ["a", "b", "c", "d", "e"], labels: ["ask", "ask", "ask", "ask"],
+    questions: ["a", "b", "c", "d", "e"], labels: Array.from({ length: N }, () => "ask"),
     modes: Array.from({ length: N }, () => "try-first"), contextFingerprints: [] };
   const r5 = h1.T.modeRule([syn5], syn5);
-  check("with N try-first replies so far, asks get the handoff", r5.ask === "handoff" && r5.other === "handoff" && r5.handoffReason === "session");
-  check("an attempt in that state is still normal", r5.attempt === "normal");
-  const syn5b = Object.assign({}, syn5, { modes: Array.from({ length: N - 1 }, () => "try-first") });
+  check("with N counted try-first asks so far, an ask gets the handoff", r5.ask === "handoff" && r5.handoffReason === "session");
+  check("an other stays try-first and an attempt stays normal", r5.other === "try-first" && r5.attempt === "normal");
+  const syn5b = Object.assign({}, syn5, { labels: syn5.labels.slice(1), modes: Array.from({ length: N - 1 }, () => "try-first") });
   const r5b = h1.T.modeRule([syn5b], syn5b);
   check("one reply short of N: still try-first, no handoff", r5b.ask === "try-first" && r5b.handoffReason === null);
   const c5 = await boot(turnsOf(8, i => ({ label: "ask" }))).run();
@@ -220,7 +237,7 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
 
   // ---------------------------------------------------------------- 6
   section(6, "empty reply on the handoff turn");
-  const t6 = longTurns(STRICT_AT + N + 3);
+  const t6 = askTurns(NH + 4);
   t6[hq] = Object.assign({}, t6[hq], { empty: true });
   const c6 = await boot(t6).run();
   const e6 = lastEntry(c6);
@@ -229,6 +246,7 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
   check("the handoff is delivered on the next turn", replyWrite(c6, hq + 1).endsWith(HM) && e6.modes[hq + 1] === "handoff");
   check("handoffAt points at that later turn; failedReplies counted", e6.handoffAt === hq + 1 && e6.failedReplies === 1);
   check("only one handoff write overall", handoffWrites(c6, T0).length === 1);
+  check("the failed turn left a null label and mode, kept aligned", e6.labels[hq] === null && e6.modes[hq] === null && e6.labels.length === e6.modes.length);
 
   // ---------------------------------------------------------------- 7
   section(7, "cross-session repeat handoff");
@@ -318,13 +336,14 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
   check("its last listed question is the real 51st-answered one, not dropped", /\n\d+\. \[[a-z?]+\] question 50\n/.test(b12 + "\n"));
   const T12 = c12.asks.length; // sanity: all 52 asked
   check("all 52 questions got an answer", T12 === 52);
+  check("labels and modes stay aligned at the cap (50 each)", lastEntry(c12).labels.length === 50 && lastEntry(c12).modes.length === 50);
   const syn = { coach: COACH_ID, started: new Date().toISOString(), exchanges: 52, questions: Array.from({ length: 50 }, (_, i) => "q" + (i + 1)), labels: Array.from({ length: 50 }, () => "ask"), modes: [], contextFingerprints: [] };
   const rule12 = h1.T.modeRule([syn], syn);
   check("modeRule counts the right prior items when the current one is not logged", rule12.recent.hasCurrent === false && rule12.recent.items.length === 50);
 
   // ---------------------------------------------------------------- 13
   section(13, "logging off (corrupt log)");
-  const h13 = boot(longTurns(STRICT_AT + N + 3), { seed: "{ this is not json" });
+  const h13 = boot(askTurns(NH + 3), { seed: "{ this is not json" });
   const c13 = await h13.run();
   check("handoff still fires once", handoffWrites(c13, T0).length === 1 && replyWrite(c13, hq).endsWith(HM));
   check("the corrupt log file is untouched", c13.fs[LOG] === h13.seeded);
@@ -337,6 +356,60 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
   check("an attempt releases it, and the next ask is normal", e14.modes[3] === "normal" && e14.modes[4] === "normal" && e14.strictReleased === true);
   const e14b = lastEntry(await boot(longTurns(STRICT_AT)).run());
   check("backstop: question 10 is try-first whatever the label", e14b.modes.slice(0, STRICT_AT - 1).every(m => m === "normal") && e14b.modes[STRICT_AT - 1] === "try-first" && e14b.strictReason === "backstop");
+
+  // ---------------------------------------------------------------- 16
+  section(16, "what counts toward the handoff");
+  const cA = await boot(longTurns(STRICT_AT + N + 3)).run();
+  const eA = lastEntry(cA);
+  check("backstop on, every turn labelled other: try-first from question 10, never a handoff",
+    eA.modes[STRICT_AT - 1] === "try-first" && eA.modes.slice(STRICT_AT - 1).every(m => m === "try-first") && handoffWrites(cA, T0).length === 0 && eA.handoff === false);
+  const cB = await boot(askTurns(NH + 2)).run();
+  check("N counted asks, then the handoff on the next counted turn",
+    lastEntry(cB).modes[NH - 1] === "try-first" && lastEntry(cB).modes[NH] === "handoff" && replyWrite(cB, NH).endsWith(HM));
+  // 3 asks switch try-first on (the 3rd is counted), then others (not counted) and asks alternate
+  const tC = turnsOf(3 + 2 * N + 2, i => ({ label: i < 3 ? "ask" : ((i - 3) % 2 === 0 ? "other" : "ask") }));
+  const cC = await boot(tC).run();
+  const eC = lastEntry(cC);
+  const hC = 2 * N + 2; // the Nth counted ask is turn 2N (turn 2 plus N-1 later asks); the next ask is turn 2N+2
+  check("mixed labels: other turns are try-first but not counted", eC.modes[3] === "try-first" && eC.labels[3] === "other");
+  check("mixed labels: the handoff lands on the ask after the Nth counted ask, not earlier",
+    eC.modes.indexOf("handoff") === hC && eC.labels[hC] === "ask" && eC.modes[hC - 1] === "try-first" && eC.labels[hC - 1] === "other");
+  check("mixed labels: exactly one handoff write", handoffWrites(cC, T0).length === 1);
+
+  // ---------------------------------------------------------------- 17
+  section(17, "once per calendar day");
+  const priorH = (started, handoffTime) => [{
+    coach: COACH_ID, started: started, updated: handoffTime || started, ended: handoffTime || started, coachVersion: "0.0.0", exchanges: 1,
+    questions: ["an earlier invented question"], labels: ["other"], modes: ["normal"], contextFingerprints: [],
+    failedReplies: 0, strict: true, strictReason: "backstop", strictReleased: false,
+    handoff: true, handoffAt: 0, handoffTime: handoffTime || started, handoffReason: "session"
+  }];
+  // earlier today (00:05 local, under 12 hours before the fixed noon, so a 24-hour rule would also say same day)
+  const cD = await boot(askTurns(NH + 6), { seed: priorH(localAt(0, 0, 5)) }).run();
+  const eD = lastEntry(cD);
+  check("same-day prior handoff: the note never appears this session", handoffWrites(cD, T0).length === 0 && eD.handoff === false && eD.handoffAt === null);
+  check("same-day: past the threshold the mode is after-handoff, reason same-day", eD.modes[NH] === "after-handoff" && eD.modes.slice(NH).every(m => m === "after-handoff") && eD.handoffReason === "same-day");
+  check("same-day: after-handoff help from the start of try-first", eD.modes[1] === "normal" && eD.modes[2] === "after-handoff");
+  check("same-day: the block tells the model not to repeat the note", /earlier today/.test(block(cD, NH)));
+  check("same-day: prompt keeps its after-handoff section", /After-handoff help:/.test(cD.asks[0].systemPrompt));
+  const cD2 = await boot(longTurns(STRICT_AT + N + 3), { seed: priorH(localAt(0, 9, 0)) }).run();
+  check("same-day with only other labels: still no note", handoffWrites(cD2, T0).length === 0 && lastEntry(cD2).modes[STRICT_AT - 1] === "after-handoff");
+  // yesterday late evening: 12.5 hours before noon but an earlier calendar day
+  const cE = await boot(askTurns(R + 6), { seed: priorH(localAt(-1, 23, 30)) }).run();
+  const eE = lastEntry(cE);
+  check("prior handoff yesterday: starts normally, note after " + R + " counted asks (repeat)",
+    eE.modes[0] === "normal" && eE.modes[2 + R] === "handoff" && eE.handoffReason === "repeat" && eE.modes.slice(2, 2 + R).every(m => m === "try-first"));
+  check("it is not suppressed as same-day", replyWrite(cE, 2 + R).endsWith(HM));
+  // 15 days ago: outside the window, N = 10
+  const cF = await boot(askTurns(NH + 2), { seed: priorH(daysAgo(15)) }).run();
+  const eF = lastEntry(cF);
+  check("prior handoff 15 days ago: N = " + N + ", reason session", eF.modes[2 + R] === "try-first" && eF.modes[NH] === "handoff" && eF.handoffReason === "session");
+  // the session that gave the handoff today makes a later session the same day quiet
+  const cG1 = await boot(askTurns(NH + 1)).run();
+  const cG2 = await boot(askTurns(NH + 3), { seed: cG1.fs[LOG] }).run();
+  const logG = logOf(cG2);
+  check("a handoff logged by one session silences the next session the same day",
+    logG.length === 2 && logG[0].handoff === true && handoffWrites(cG2, T0).length === 0 && logG[1].handoffReason === "same-day" && logG[1].handoff === false);
 
   // ---------------------------------------------------------------- 15
   section(15, "prompt wording and message hygiene");

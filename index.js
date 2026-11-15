@@ -945,19 +945,34 @@ Some assignments begin with a starter project. When <starter_check> says a proje
   const TRY_FIRST_WINDOW = 5;
   const RECENT_QUESTIONS_SHOWN = 10;   // questions listed in <recent_questions>
   const RECENT_QUESTION_CHARS = 160;   // each one cut to this length
-  const HANDOFF_AFTER_TRY_FIRST = 10;  // try-first replies in one session before the one-time teacher handoff
-  const HANDOFF_REPEAT_AFTER = 3;      // same, when an earlier session in this box (last STRICT_WORKSPACE_DAYS days) got a handoff
+  // The handoff counts only turns in THIS session that were try-first AND labelled [[ask]];
+  // [[other]] and [[attempt]] turns never count, so a student working through errors under
+  // the question-10 backstop is not handed off. Only an [[ask]] turn carries the note.
+  const HANDOFF_AFTER_TRY_FIRST = 10;  // counted turns (try-first + ask) in one session before the one-time teacher handoff
+  const HANDOFF_REPEAT_AFTER = 3;      // same, when an earlier session in this box (last STRICT_WORKSPACE_DAYS days) got a handoff on an EARLIER day
+  // Once per day: if an earlier session in this box got a handoff on the same local calendar
+  // day, this session never shows the note again. Its try-first turns get after-handoff help
+  // instead (handoff stays false, handoffReason is "same-day").
   const CHECKS_IN_A_ROW = 3;           // edit-then-ask turns in a row before "run it and test every case yourself"
   const HANDOFF_MESSAGE = "This coach is meant for quick questions and help with bugs. Your questions now are a better fit for your teacher, so please reach out to them for help. I can still help you find typos or understand the directions.";
   const MODE_LABELS = ["ask", "attempt", "other"];
 
   // This coach's recent questions in this box (last STRICT_WORKSPACE_DAYS days, this
   // session included), each with the label the model gave it (null if none yet).
-  // priorHandoff: an earlier session here already gave a handoff. hasCurrent: the
+  // priorHandoff: an earlier session here already gave a handoff; sameDayHandoff: one of
+  // them on today's local calendar date (the student's own clock). hasCurrent: the
   // current question is the last item (false once the logged-question cap stops it).
+  function sameLocalDay(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return false;
+    const n = new Date();
+    return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  }
+
   function recentQuestionList(history, session) {
     let total = 0;
     let priorHandoff = false;
+    let sameDayHandoff = false;
     let items = [];
     const list = Array.isArray(history) ? history : [];
     for (let i = 0; i < list.length; i++) {
@@ -965,7 +980,10 @@ Some assignments begin with a starter project. When <starter_check> says a proje
       if (!s || typeof s !== "object" || s.coach !== COACH_ID) continue;
       const startedMs = Date.parse(s.started);
       if (s !== session && !(startedMs > Date.now() - STRICT_WORKSPACE_DAYS * 86400000)) continue;
-      if (s !== session && s.handoff === true) priorHandoff = true;
+      if (s !== session && s.handoff === true) {
+        priorHandoff = true;
+        if (sameLocalDay(s.handoffTime || s.updated || s.started)) sameDayHandoff = true;
+      }
       const qs = Array.isArray(s.questions) ? s.questions : [];
       const labels = Array.isArray(s.labels) ? s.labels : [];
       total += (typeof s.exchanges === "number" && s.exchanges >= qs.length) ? s.exchanges : qs.length;
@@ -974,7 +992,7 @@ Some assignments begin with a starter project. When <starter_check> says a proje
       }
     }
     const hasCurrent = Array.isArray(session.questions) && session.questions.length === (session.exchanges || 0);
-    return { total: total, items: items, priorHandoff: priorHandoff, hasCurrent: hasCurrent };
+    return { total: total, items: items, priorHandoff: priorHandoff, sameDayHandoff: sameDayHandoff, hasCurrent: hasCurrent };
   }
 
   // Which help each possible label of the CURRENT question gets this turn: normal,
@@ -999,24 +1017,33 @@ Some assignments begin with a starter project. When <starter_check> says a proje
     const priorAsks = prior.filter(function(it) { return it.label === "ask"; }).length;
     const modes = Array.isArray(session.modes) ? session.modes : [];
     const lastMode = modes.length ? modes[modes.length - 1] : "normal";
+    const tryFirstOn = lastMode === "try-first" || lastMode === "after-handoff"; // after-handoff here only means a same-day session
     let rule;
     if ((session.exchanges || 0) >= STRICT_SESSION_QUESTIONS) {
       rule = { ask: "try-first", attempt: "try-first", other: "try-first", backstop: true };
     } else {
       rule = {
-        ask: (priorAsks + 1 >= TRY_FIRST_ASKS || lastMode === "try-first") ? "try-first" : "normal",
+        ask: (priorAsks + 1 >= TRY_FIRST_ASKS || tryFirstOn) ? "try-first" : "normal",
         attempt: "normal",
-        other: lastMode === "try-first" ? "try-first" : "normal",
+        other: tryFirstOn ? "try-first" : "normal",
         backstop: false
       };
     }
     rule.handoffReason = null;
-    // Enough try-first replies already: the next try-first turn carries the handoff.
-    const tryFirstSoFar = modes.filter(function(m) { return m === "try-first"; }).length;
-    const limit = recent.priorHandoff ? HANDOFF_REPEAT_AFTER : HANDOFF_AFTER_TRY_FIRST;
-    if (tryFirstSoFar >= limit) {
-      ["ask", "attempt", "other"].forEach(function(l) { if (rule[l] === "try-first") rule[l] = "handoff"; });
-      if (rule.ask === "handoff" || rule.attempt === "handoff" || rule.other === "handoff") {
+    if (recent.sameDayHandoff) {
+      // Already handed off earlier today: never the note again. Try-first turns get
+      // after-handoff help instead, from the start of try-first.
+      ["ask", "attempt", "other"].forEach(function(l) {
+        if (rule[l] === "try-first") { rule[l] = "after-handoff"; rule.handoffReason = "same-day"; }
+      });
+    } else {
+      // Counted turns: this session's replies that were try-first AND labelled ask.
+      let counted = 0;
+      for (let i = 0; i < modes.length; i++) { if (modes[i] === "try-first" && labels[i] === "ask") counted++; }
+      const limit = recent.priorHandoff ? HANDOFF_REPEAT_AFTER : HANDOFF_AFTER_TRY_FIRST;
+      // Only an ask turn carries the handoff; other and attempt turns stay try-first.
+      if (counted >= limit && rule.ask === "try-first") {
+        rule.ask = "handoff";
         rule.handoffReason = recent.priorHandoff ? "repeat" : "session";
       }
     }
@@ -1048,6 +1075,7 @@ Some assignments begin with a starter project. When <starter_check> says a proje
       "- [[ask]]: " + big(rule.ask) + "\n" +
       "- [[attempt]]: " + big(rule.attempt) + "\n" +
       "- [[other]]: " + big(rule.other) + "\n" +
+      (rule.handoffReason === "same-day" ? "You already told this student earlier today to go over this assignment with their teacher. Do not repeat that note.\n" : "") +
       (session.handoff === true ? "You already told this student to go over this assignment with their teacher. Do not repeat that note.\n" : "") +
       (rule.checkStreak >= CHECKS_IN_A_ROW ? "They have asked you to check an edit " + rule.checkStreak + " times in a row. If this message is another check, do not check it. Ask them to run it, try every case, and tell you what happened. Do not say how many times, or that this is a pattern.\n" : "") +
       "</recent_questions>";
@@ -1102,14 +1130,19 @@ Some assignments begin with a starter project. When <starter_check> says a proje
     if (!Array.isArray(session.labels)) session.labels = [];
     if (!Array.isArray(session.modes)) session.modes = [];
     // labels line up with questions: pad for any earlier question that got no reply
-    while (session.labels.length < (session.questions || []).length - 1) session.labels.push(null);
+    const upTo = Math.min((session.exchanges || 1) - 1, MAX_LOGGED_QUESTIONS);
+    while (session.labels.length < upTo) session.labels.push(null);
     while (session.modes.length < session.labels.length) session.modes.push(null);
     if (session.labels.length < MAX_LOGGED_QUESTIONS) session.labels.push(label);
     if (session.modes.length < MAX_LOGGED_QUESTIONS) session.modes.push(mode);
     if (mode === "handoff") {
       session.handoff = true;
       session.handoffAt = (session.exchanges || 1) - 1;
+      session.handoffTime = new Date().toISOString(); // the once-a-day check reads its local date
       session.handoffReason = rule.handoffReason || null;
+    }
+    if (mode === "after-handoff" && !session.handoff && rule.handoffReason === "same-day" && !session.handoffReason) {
+      session.handoffReason = "same-day"; // told earlier today: no second note, after-handoff help only
     }
     if (mode === "try-first" || mode === "handoff" || mode === "after-handoff") {
       session.strictReleased = false;
