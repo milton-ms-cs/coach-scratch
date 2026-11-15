@@ -96,6 +96,7 @@ function boot(turns, opts) {
         cap.asks.push(JSON.parse(JSON.stringify(payload)));
         cap.turn = cap.asks.length - 1;
         const t = turns[cap.turn] || {};
+        if (opts.askDelay) await new Promise(r => setTimeout(r, opts.askDelay)); // like a real ask(): takes time
         if (t.throws) throw new Error("ask failed");
         if (t.empty) return { result: "" };
         return { result: t.reply !== undefined ? t.reply : "[[" + (t.label || "other") + "]]\nReply " + (cap.turn + 1) + "." };
@@ -121,8 +122,8 @@ function boot(turns, opts) {
         if (/\.sb3$/i.test(p)) return makeSb3(state.rev);
         throw new Error("no such file");
       },
-      async add(p, content) { cap.fs[p] = content; },
-      async deleteFiles(paths) { for (const p of paths) delete cap.fs[p]; }
+      async add(p, content) { if (opts.hangWrites) return new Promise(() => {}); cap.fs[p] = content; },
+      async deleteFiles(paths) { if (opts.hangWrites) return new Promise(() => {}); for (const p of paths) delete cap.fs[p]; }
     }
   };
   const window = { codioIDE };
@@ -273,13 +274,26 @@ const daysAgo = d => new Date(Date.now() - d * 86400000).toISOString();
 
   // ---------------------------------------------------------------- 10
   section(10, "last turn is saved without a bye (P1)");
+  // ask() takes real time (30 ms), as in Codio. With an instant mock the earlier saves are still
+  // draining and mask a missing post-reply queueSave.
   let snap = null;
   const t10 = turnsOf(3, () => ({ label: "ask" }));
-  await boot(t10, { onClose: async cap => { await new Promise(r => setTimeout(r, 60)); snap = JSON.parse(cap.fs[LOG]); } }).run();
+  await boot(t10, { askDelay: 30, onClose: async cap => { await new Promise(r => setTimeout(r, 80)); snap = JSON.parse(cap.fs[LOG]); } }).run();
   const s10 = snap && snap[snap.length - 1];
   check("before any bye, the saved log has a label and mode for every answered question",
     !!s10 && s10.questions.length === 3 && s10.labels.length === 3 && s10.modes.length === 3 && s10.labels.every(l => !!l) && s10.modes.every(m => !!m));
   check("and a fingerprint for each", !!s10 && s10.contextFingerprints.length === 3);
+  // one turn: the first-turn call site
+  let snap1 = null;
+  await boot(turnsOf(1, () => ({ label: "ask" })), { askDelay: 30, onClose: async cap => { await new Promise(r => setTimeout(r, 80)); snap1 = JSON.parse(cap.fs[LOG]); } }).run();
+  const s10b = snap1 && snap1[snap1.length - 1];
+  check("one-turn session: the first reply's label and mode are saved before any bye",
+    !!s10b && s10b.questions.length === 1 && s10b.labels.length === 1 && s10b.modes.length === 1 && !!s10b.labels[0] && !!s10b.modes[0]);
+  // a write that never finishes must not block the turn loop
+  const h10c = boot(turnsOf(3, () => ({ label: "other" })), { askDelay: 5, hangWrites: true });
+  const done10c = h10c.run().then(() => "done", () => "done");
+  await Promise.race([done10c, new Promise(r => setTimeout(r, 1500))]);
+  check("hanging log writes: turn 2 and turn 3 still get answers", h10c.cap.asks.length === 3 && replyWrite(h10c.cap, 1) === "Reply 2." && replyWrite(h10c.cap, 2) === "Reply 3.");
 
   // ---------------------------------------------------------------- 11
   section(11, "context refresh failure keeps files but refreshes the block (P4)");

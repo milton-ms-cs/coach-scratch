@@ -633,6 +633,7 @@ eval(src);
       });
       check(T.stripStarterPins("a\n<!-- coach-starter: v1 sb3 10-00000001 A.sb3 -->\nb") === "a\nb", "strip: pin line removed");
       check(T.stripStarterPins("a\n\nb  ") === "a\n\nb  ", "strip: text without pins unchanged");
+      check(T.stripStarterPins("a\n<!-- coach-starter: v1 sb3 10-00000001 A.sb3\nSecond line of guide text\nmore\n-->\nend") === "a\nSecond line of guide text\nmore\n-->\nend", "strip: a pin with no closing --> removes only its own line");
     }
 
     // normalization and golden fingerprint

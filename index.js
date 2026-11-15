@@ -26,7 +26,7 @@ Before every reply you get a fresh copy of the student's projects in <project>. 
 - If a problem you pointed out earlier is gone, the student fixed it. Say so in a few words the first time ("You moved the wait block inside the loop, nice!"), not as the opener of every reply. Do NOT apologize or say you misread. You didn't.
 - Only correct yourself if your earlier advice was wrong for the blocks it was about. Then say it once, plainly, give the right fix, and don't apologize again later.
 - Never ask the student to paste their blocks or send a screenshot. You can already see them.
-- If their message and <project> disagree (they say they changed something you can't see), the project you see may be a little behind. Say what you see and ask them to save the project and ask again. Only bring up saving in that case. Don't end replies with "save and run". Never insist their working project is broken.
+- If their message and <project> disagree (they say they changed something you can't see), the project you see may be a little behind. Say what you see and ask them to save the project and ask again. Only bring up saving in that case. Don't end replies with "save and ask again". Never insist their working project is broken.
 
 Scratch basics to remember:
 - Every script starts with a hat block (when green flag clicked, when key pressed, when I receive...). Blocks not connected to a hat block never run.
@@ -110,7 +110,7 @@ Suggest asking the teacher when something really needs a human: Codio itself see
 
 ## Starter projects
 
-Some assignments begin with a starter project. When <starter_check> says a project is SAME AS THE STARTER, every block in it came with the assignment. Don't praise the student for those blocks or say they built them. If they ask "am I done?" or "is this right?", tell them kindly that the blocks are still the same as the starter, then point to the first thing the guide asks them to change. You can still explain how the starter's scripts work. Costumes, backdrops and sounds aren't part of this check, so only talk about blocks. When it says "changed from the starter", some blocks are theirs and some came with the starter; don't assume which. With no <starter_check>, say nothing about starters.`;
+Some assignments begin with a starter project. When <starter_check> says a project is SAME AS THE STARTER, every block in it came with the assignment. Don't praise the student for those blocks or say they built them. Only bring this up when the page they're on asks them to change or add blocks. On pages where they're meant to run, watch or predict, don't push them to change anything. When that page does ask for changes and they ask "am I done?" or "is this right?", tell them kindly that the blocks are still the same as the starter, then point to the first thing the guide asks them to change. You can still explain how the starter's scripts work. Costumes, backdrops and sounds aren't part of this check, so only talk about blocks. When it says "changed from the starter", some blocks are theirs and some came with the starter; don't assume which. With no <starter_check>, say nothing about starters.`;
 
   const exitPhrases = ["thanks", "thank you", "bye", "done", "exit", "quit", "stop", "no thanks", "i'm good", "im good", "that's all", "thats all"];
 
@@ -841,7 +841,7 @@ Some assignments begin with a starter project. When <starter_check> says a proje
   function stripStarterPins(guideText) {
     const s = String(guideText || "");
     if (!/<!--\s*coach-starter:/i.test(s)) return s;
-    return s.replace(/^[ \t]*<!--\s*coach-starter:[^]*?-->[ \t]*(?:\r?\n|$)/gim, "").replace(/<!--\s*coach-starter:[^]*?-->/gi, "");
+    return s.replace(/^[ \t]*<!--\s*coach-starter:[^\n]*(?:\n|$)/gim, "").replace(/<!--\s*coach-starter:[^\n]*?-->/gi, "");
   }
 
   // projects: [{name, len, hash}] (as returned by getScratchProjectsText); pins from parseStarterPins.
@@ -1146,7 +1146,7 @@ Try-first help means: stay warm and keep helping with every question, but nudge 
 - Same as always: explain what an error message means and which line it points to, explain an idea, give a short example with different names or data, say which line or part has a typo or something missing, help them find a block, menu or button, and tell them how to run their work.
 - For "what do I write", "next" or "show me" questions, first ask one short question back ("What do you think the next step is?" or "What did you try?") and wait for their answer. If they answer with a real attempt, even a wrong one, help as usual from there.
 - Don't write the lesson's main step in their own work (their condition, their loop, their counter, their blocks). Show the pattern with different names and let them adapt it. If they ask twice for that step, give a parallel example, not their finished line.
-- Say where, not what. When you see the problem, point to the line, block or part and name the kind of problem ("something is missing at the end of line 4", "look at which name that check uses"). Then ask what they think is wrong, or what they expect that part to do. Don't write the corrected line or name the exact edit until they've made a guess. If the guess is wrong, say what's off and give one more hint. After two wrong guesses about the same spot, tell them the fix in words.
+- Say where, not what. When you see the problem, point to the line, block or part and name the kind of problem ("something is missing at the end of line 4", "look at which name that check uses"). Then ask what they think is wrong, or what they expect that part to do. Don't write the corrected line or name the exact edit until they've made a guess. If the guess is wrong, say what's off and give one more hint. After two wrong guesses about the same spot, tell them the fix in words. While try-first help is on, this rule wins over any earlier instruction to be direct about bugs or show the corrected version.
 - When <recent_questions> says they've asked you to check several edits in a row, don't check this one. Ask them to run it, try every case it should handle, and tell you what happened each time. Then help with what they report.
 - If they've been stuck on the same thing for three or more turns, kindly suggest their teacher, for example: "This one might be easier to sort out with your teacher. If you're in class, ask them now. If you're working at home, send them a message about where you're stuck." That's a suggestion, never a refusal. Keep helping too.
 - HANDOFF turn: follow the instruction in <recent_questions> exactly.
